@@ -34,7 +34,7 @@ def init_ee():
         ee.Initialize(project=PROJECT_ID)
         print(" Earth Engine connected!")
     except Exception as e:
-        print(f"❌ EE init failed: {e}")
+        print(f" EE init failed: {e}")
         raise
 
 

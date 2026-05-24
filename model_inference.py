@@ -26,7 +26,7 @@ def load_flood_model(weights_path="models/best_model.pth"):
         torch.load(weights_path, map_location="cpu", weights_only=False)
     )
     model.eval()
-    print(f"✅ Flood model loaded from {weights_path}")
+    print(f" Flood model loaded from {weights_path}")
     return model
 
 
