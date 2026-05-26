@@ -1,231 +1,188 @@
+"""
+main.py
+-------
+Unified Flood Detection Engine for Pakistan.
+Combines:
+1. Live River Flows (FFC Scraper)
+2. Historical 2010 Flood Analysis (GEE Landsat)
+3. Current Run-time Flood Prediction (GEE Sentinel-1 + UNet)
+4. AI Strategic Insights (Groq / Gemini)
+"""
+
+import os
 import ee
+import json
+import pandas as pd
 import requests
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from PIL import Image
-import io
-import json
-import os
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from model_inference import load_flood_model, predict_flood
+
+# Internal Imports
+from scrapers.ffc_scraper import get_ffc_data
+from engine.ai_alerts import FloodAI
+from engine.data_manager import save_district_data, save_json
+from models.model_inference import load_flood_model, predict_flood
+from utils.ndwi import get_flood_mask
+from utils.districts import detect_name_column, shapely_to_ee, PRIORITY_DISTRICTS
+from utils.visualize import plot_static_map, plot_interactive_map
+import geopandas as gpd
 
 load_dotenv()
 
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+SHAPEFILE = "pakistan_districts.json"
 PROJECT_ID = os.getenv("PROJECT_ID")
+WEIGHTS_PATH = os.path.abspath("models/best_model.pth")
 
-DISTRICTS = {
-    "DG Khan":  [70.2, 29.8, 71.2, 30.8],
-    "Sukkur":   [68.5, 27.5, 69.5, 28.5],
-    "Nowshera": [71.8, 34.0, 72.4, 34.6],
-    "Larkana":  [67.8, 27.3, 68.5, 27.9],
-    "Quetta":   [66.8, 30.0, 67.8, 31.0],
-}
-
-# Load model ONCE at startup
-FLOOD_MODEL = load_flood_model("models/best_model.pth")
-
-
-# ══════════════════════════════════════════════════════════
-# STEP 1 — Init Earth Engine
-# ══════════════════════════════════════════════════════════
-def init_ee():
+def init_gee():
+    print("🔐 Initializing Google Earth Engine...")
     try:
-        ee.Initialize(project=PROJECT_ID)
-        print("Earth Engine connected!")
+        if PROJECT_ID:
+            ee.Initialize(project=PROJECT_ID)
+        else:
+            ee.Initialize()
+        print("   ✅ GEE Connected.")
     except Exception as e:
-        print(f"EE init failed: {e}")
-        raise
+        print(f"   ❌ GEE Initialization failed: {e}")
+        return False
+    return True
 
-
-# ══════════════════════════════════════════════════════════
-# STEP 2 — Fetch SAR image from Google Earth Engine
-# ══════════════════════════════════════════════════════════
-def fetch_sar_tile(bbox, date_start, date_end, size=256):
-    print(f"  Fetching SAR image from Google Earth Engine...")
-    print(f"  Area  : {bbox}")
-    print(f"  Dates : {date_start} → {date_end}")
-
+def fetch_current_sar_image(bbox, size=256):
+    """
+    Fetches latest Sentinel-1 SAR image with a Slope Mask to fix mountain false positives.
+    """
+    date_end = datetime.now()
+    date_start = date_end - timedelta(days=30)
+    
     region = ee.Geometry.Rectangle(bbox)
-
+    
     collection = (
         ee.ImageCollection("COPERNICUS/S1_GRD")
         .filterBounds(region)
-        .filterDate(date_start, date_end)
+        .filterDate(date_start.strftime('%Y-%m-%d'), date_end.strftime('%Y-%m-%d'))
         .filter(ee.Filter.eq("instrumentMode", "IW"))
         .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
         .select("VV")
     )
-
-    count = collection.size().getInfo()
-    print(f"  Found {count} satellite scenes")
-
-    if count == 0:
-        print("  No images found — widening date range to full 2024...")
-        collection = (
-            ee.ImageCollection("COPERNICUS/S1_GRD")
-            .filterBounds(region)
-            .filterDate("2024-01-01", "2024-12-31")
-            .filter(ee.Filter.eq("instrumentMode", "IW"))
-            .select("VV")
-        )
+    
+    if collection.size().getInfo() == 0:
+        # Fallback to longer range if no recent images
+        collection = ee.ImageCollection("COPERNICUS/S1_GRD").filterBounds(region).filterDate("2024-01-01", "2024-12-31").select("VV")
 
     image = collection.median()
-
-    # Download as PNG — GEE scales SAR dB values min=-25, max=0
-    url = image.getThumbURL({
-        "region":     bbox,
+    
+    # ── MOUNTAIN FIX: Slope Masking ──────────────────────────
+    # Radar shadows on steep slopes look like water (dark). 
+    # We mask areas with slope > 15 degrees.
+    elevation = ee.Image("USGS/SRTMGL1_003")
+    slope = ee.Terrain.slope(elevation)
+    slope_mask = slope.lt(15) 
+    
+    # Unmask to 0 (which is white in our -25 to 0 scale) so masked areas are seen as LAND
+    masked_image = image.updateMask(slope_mask).unmask(0)
+    
+    url = masked_image.getThumbURL({
+        "region": bbox,
         "dimensions": size,
-        "format":     "png",
-        "min":        -25,
-        "max":        0,
+        "format": "png",
+        "min": -25,
+        "max": 0,
     })
+    
+    res = requests.get(url, timeout=30)
+    res.raise_for_status()
+    return res.content
 
-    response = requests.get(url, timeout=30)
-    response.raise_for_status()
-    print(f"  Image downloaded — {len(response.content):,} bytes")
+def main():
+    if not init_gee(): return
 
-    return response.content
+    # 1. Load Resources
+    print("\n🧠 Loading Models and AI...")
+    model = load_flood_model(WEIGHTS_PATH)
+    ai = FloodAI()
+    
+    print("\n🌊 Fetching Live River flows...")
+    river_flows = get_ffc_data()
+    save_json("river_flows.json", {"timestamp": datetime.now().strftime("%Y-%m-%d"), "data": river_flows})
 
+    # 2. Load Districts
+    print(f"\n📂 Processing Priority Districts from {SHAPEFILE}...")
+    gdf = gpd.read_file(SHAPEFILE)
+    if gdf.crs and gdf.crs.to_epsg() != 4326:
+        gdf = gdf.to_crs(epsg=4326)
+    
+    name_col = detect_name_column(gdf)
+    mask = gdf[name_col].apply(lambda x: any(p.lower() in str(x).lower() for p in PRIORITY_DISTRICTS))
+    gdf_priority = gdf[mask].copy()
+    print(f"   Targeting {len(gdf_priority)} districts.")
 
-# ══════════════════════════════════════════════════════════
-# STEP 3 — Display result with U-Net flood mask
-# ══════════════════════════════════════════════════════════
-def display_with_model_mask(image_bytes, model_result, district_name):
-    """
-    Shows 3-panel visualization:
-    Panel 1 — Raw SAR image from GEE
-    Panel 2 — U-Net flood mask overlay (blue = flood)
-    Panel 3 — Risk score bar chart
-    """
-    # Use the preprocessed display array from model_result
-    # This is already correctly normalized and matches model input
-    display_arr = model_result.get("display_arr")
+    # 3. Process each district
+    results = []
+    
+    # Pre-fetch 2010 flood mask for whole Pakistan to save time (Historical Context)
+    print("\n🛰  Computing 2010 Historical Flood Baseline (GEE Landsat)...")
+    pakistan_bbox = ee.Geometry.BBox(60.0, 23.0, 77.5, 37.5)
+    hist_flood_mask, _, _ = get_flood_mask(pakistan_bbox)
 
-    if display_arr is not None:
-        # Resize display array to 256x256 for visualization
-        from PIL import Image as PILImage
-        disp = PILImage.fromarray((display_arr * 255).astype(np.uint8))
-        disp = disp.resize((256, 256))
-        arr  = np.array(disp)
-    else:
-        # Fallback — open original PNG
-        img = Image.open(io.BytesIO(image_bytes)).convert("L").resize((256, 256))
-        arr = np.array(img)
+    for i, row in gdf_priority.iterrows():
+        name = row[name_col]
+        print(f"\n[{i+1}] Analyzing: {name}")
+        
+        try:
+            ee_geom = shapely_to_ee(row.geometry)
+            bbox = row.geometry.bounds # (minx, miny, maxx, maxy)
+            
+            # A. Historical 2010 Flood %
+            # Reusing the function from districts.py logic (could import it but easier to keep here for clarity)
+            from utils.districts import flood_percent_for_district
+            pct_2010 = flood_percent_for_district(ee_geom, hist_flood_mask)
+            
+            # B. Current Flood Detection (UNet + Sentinel-1)
+            print(f"   Running Live SAR Detection...")
+            sar_bytes = fetch_current_sar_image(list(bbox))
+            unet_result = predict_flood(model, sar_bytes, name, list(bbox))
+            pct_current = unet_result['water_coverage_pct']
+            
+            # C. River Flow Match
+            flow_status = "NORMAL"
+            for f in river_flows:
+                if f['station'].lower() in name.lower():
+                    flow_status = f['status']
+                    break
+            
+            results.append({
+                "district": name,
+                "flood_pct_2010": pct_2010,
+                "flood_pct_current": pct_current,
+                "river_status": flow_status,
+                "risk_score": unet_result['risk_score'],
+                "geometry": row.geometry
+            })
+            
+            print(f"   Done: 2010({pct_2010}%) | Current({pct_current}%) | Flow({flow_status})")
 
-    mask = model_result["pred_mask"]   # 256x256 bool array
+        except Exception as e:
+            print(f"   ⚠️ Error processing {name}: {e}")
 
-    # Build RGB overlay — blue where flood predicted
-    rgb = np.stack([arr, arr, arr], axis=-1).copy()
-    rgb[mask] = [30, 90, 210]
+    # 4. Generate AI Insights
+    print("\n💡 Generating AI Insights (Groq/Gemini)...")
+    summary_for_ai = [{k:v for k,v in r.items() if k != 'geometry'} for r in results]
+    insights = ai.generate_insights(summary_for_ai, river_flows)
+    save_json("ai_insights.json", {"content": insights})
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-    fig.suptitle(
-        f"FloodSense — {district_name}  |  "
-        f"Risk: {model_result['risk_score']}/10  |  "
-        f"{model_result['water_coverage_pct']}% flooded  |  "
-        f"{model_result['affected_area_km2']} km²",
-        fontsize=13, fontweight="bold"
-    )
-
-    # Panel 1 — Raw SAR
-    axes[0].imshow(arr, cmap="gray")
-    axes[0].set_title("SAR Image\n(Sentinel-1 via Google Earth Engine)")
-    axes[0].axis("off")
-
-    # Panel 2 — Flood overlay
-    axes[1].imshow(rgb)
-    axes[1].set_title(
-        f"U-Net Flood Detection\n"
-        f"{model_result['affected_area_km2']} km² affected"
-    )
-    axes[1].legend(
-        handles=[
-            mpatches.Patch(color=(30/255, 90/255, 210/255), label="Flood"),
-            mpatches.Patch(color="gray", label="Land")
-        ],
-        loc="lower right", fontsize=9
-    )
-    axes[1].axis("off")
-
-    # Panel 3 — Risk bar
-    score     = model_result["risk_score"]
-    bar_color = "#3B6D11" if score <= 3 else "#BA7517" if score <= 6 else "#A32D2D"
-
-    # Background bar (full scale)
-    axes[2].barh(["Risk"], [10],    color="#EEEEEE",  height=0.4, zorder=0)
-    # Actual risk bar
-    axes[2].barh(["Risk"], [score], color=bar_color,  height=0.4, zorder=1)
-    axes[2].set_xlim(0, 12)
-    axes[2].set_title("Flood Risk Score\n(U-Net ResNet34 — IoU: 0.9894)")
-    axes[2].set_xlabel("1 = safe,  10 = severe")
-    axes[2].text(
-        score + 0.3, 0, f"{score}/10",
-        va="center", fontsize=13, fontweight="bold", color=bar_color
-    )
-
-    plt.tight_layout()
-    fname = f"floodsense_{district_name.lower().replace(' ', '_')}.png"
-    plt.savefig(fname, dpi=150, bbox_inches="tight")
-    print(f"  Saved → {fname}")
-    plt.show()
-    plt.close()
-
-
-# ══════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════
-def run(
-        district_name="Quetta",
-        date_start="2024-08-01",
-        date_end="2024-08-15"
-):
-    print(f"\n{'='*55}")
-    print(f"  FloodSense — {district_name}")
-    print(f"{'='*55}\n")
-
-    # 1. Connect to Earth Engine
-    init_ee()
-
-    bbox = DISTRICTS[district_name]
-
-    # 2. Download SAR satellite image from GEE
-    image_bytes = fetch_sar_tile(bbox, date_start, date_end)
-
-    # 3. Run U-Net flood segmentation
-    print("  Running U-Net flood segmentation...")
-    model_result = predict_flood(FLOOD_MODEL, image_bytes, district_name, bbox)
-
-    print(f"\n  Results for {district_name}:")
-    print(f"  Water coverage : {model_result['water_coverage_pct']}%")
-    print(f"  Affected area  : {model_result['affected_area_km2']} km²")
-    print(f"  Risk score     : {model_result['risk_score']}/10")
-    print(f"  Risk level     : {model_result['settlement_risk']}")
-
-    # 4. Show visualization
-    display_with_model_mask(image_bytes, model_result, district_name)
-
-    # 5. Save JSON result
-    output = {
-        "district":   district_name,
-        "date_range": f"{date_start} to {date_end}",
-        "risk_score": model_result["risk_score"],
-        "water_pct":  model_result["water_coverage_pct"],
-        "area_km2":   model_result["affected_area_km2"],
-        "risk_level": model_result["settlement_risk"],
-    }
-
-    out_file = f"result_{district_name.lower().replace(' ', '_')}.json"
-    with open(out_file, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    print(f"  Result saved → {out_file}")
-
-    return output
-
+    # 5. Export and Visualize
+    print("\n📊 Creating Dashboard...")
+    df_results = pd.DataFrame(results)
+    
+    # For visualization, we'll use current flood % as primary color
+    df_results['flood_pct'] = df_results['flood_pct_current'] 
+    
+    os.makedirs("outputs", exist_ok=True)
+    plot_static_map(df_results, out_path="outputs/flood_map.png")
+    plot_interactive_map(df_results, out_path="outputs/dashboard.html")
+    
+    print("\n✅ All set! Dashboard ready at outputs/dashboard.html")
 
 if __name__ == "__main__":
-    run(
-        district_name="Quetta",
-        date_start="2024-08-01",
-        date_end="2024-08-15",
-    )
+    main()

@@ -1,0 +1,159 @@
+{
+    "timestamp": "2026-05-27",
+    "data": [
+        {
+            "station": "Chashma",
+            "river": "Indus",
+            "inflow": 135128,
+            "outflow": 120028,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Guddu",
+            "river": "Indus",
+            "inflow": 65304,
+            "outflow": 56471,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Kala Bagh",
+            "river": "Indus",
+            "inflow": 125008,
+            "outflow": 117628,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Kotri",
+            "river": "Indus",
+            "inflow": 15970,
+            "outflow": 0,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Sukkur",
+            "river": "Indus",
+            "inflow": 54010,
+            "outflow": 17110,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Tarbela Dam",
+            "river": "Indus",
+            "inflow": 63000,
+            "outflow": 62000,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Taunsa",
+            "river": "Indus",
+            "inflow": 111746,
+            "outflow": 89346,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Nowshera",
+            "river": "Kabul",
+            "inflow": 44200,
+            "outflow": 44200,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Mangla Dam",
+            "river": "Jhelum",
+            "inflow": 40000,
+            "outflow": 31055,
+            "status": "NORMAL"
+        },
+        {
+            "station": "New Rasul",
+            "river": "Jhelum",
+            "inflow": 34038,
+            "outflow": 11895,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Khanki",
+            "river": "Chenab",
+            "inflow": 9967,
+            "outflow": 3732,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Marala",
+            "river": "Chenab",
+            "inflow": 22650,
+            "outflow": 7000,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Qadirabad",
+            "river": "Chenab",
+            "inflow": 23361,
+            "outflow": 2836,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Trimmu",
+            "river": "Chenab",
+            "inflow": 22582,
+            "outflow": 7482,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Balloki",
+            "river": "Ravi",
+            "inflow": 28705,
+            "outflow": 2305,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Jassar",
+            "river": "Ravi",
+            "inflow": 1009,
+            "outflow": 1009,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Shahdara",
+            "river": "Ravi",
+            "inflow": 821,
+            "outflow": 821,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Sidhnai",
+            "river": "Ravi",
+            "inflow": 12500,
+            "outflow": 0,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Ganda Singh Wala",
+            "river": "Sutlej",
+            "inflow": 0,
+            "outflow": 0,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Islam",
+            "river": "Sutlej",
+            "inflow": 1430,
+            "outflow": 0,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Panjnad",
+            "river": "Sutlej",
+            "inflow": 8417,
+            "outflow": 0,
+            "status": "NORMAL"
+        },
+        {
+            "station": "Sulemanki",
+            "river": "Sutlej",
+            "inflow": 14320,
+            "outflow": 3017,
+            "status": "NORMAL"
+        }
+    ]
+}
