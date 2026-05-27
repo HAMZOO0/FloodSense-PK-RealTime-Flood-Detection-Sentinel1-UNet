@@ -58,7 +58,7 @@ def plot_static_map(df: pd.DataFrame, out_path: str = "outputs/flood_map.png"):
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
-    print(f"✅ Static map saved → {out_path}")
+    print(f"[OK] Static map saved -> {out_path}", flush=True)
     plt.close()
 
 
@@ -71,7 +71,7 @@ def plot_interactive_map(df: pd.DataFrame, out_path: str = "outputs/dashboard.ht
     """
     gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
     gdf["flood_pct_current"] = gdf["flood_pct_current"].fillna(0).round(2)
-    gdf["flood_pct_2010"] = gdf["flood_pct_2010"].fillna(0).round(2)
+    gdf["flood_pct_2010"] = pd.to_numeric(gdf["flood_pct_2010"], errors="coerce").fillna(0).round(2)
     gdf["flood_pct"] = gdf["flood_pct_current"] # for color scale
 
     # Centre map on Pakistan
@@ -114,4 +114,4 @@ def plot_interactive_map(df: pd.DataFrame, out_path: str = "outputs/dashboard.ht
     colormap.add_to(m)
 
     m.save(out_path)
-    print(f"✅ Interactive dashboard saved → {out_path}")
+    print(f"[OK] Interactive map saved -> {out_path}", flush=True)

@@ -1,7 +1,6 @@
 import os
 import json
 from datetime import datetime
-import google.generativeai as genai
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -9,20 +8,10 @@ load_dotenv()
 
 class FloodAI:
     def __init__(self):
-        # Gemini Init
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key and gemini_key != "your-gemini-key" and len(gemini_key) > 10:
-            try:
-                genai.configure(api_key=gemini_key)
-                self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                self.gemini_enabled = True
-            except Exception as e:
-                print(f"⚠️ Gemini configuration failed: {e}")
-                self.gemini_enabled = False
-        else:
-            self.gemini_enabled = False
+        self.gemini_enabled = False
+        self.gemini_model = None
 
-        # Groq Init
+        # Groq Init (preferred)
         groq_key = os.getenv("GROQ_API_KEY")
         if groq_key and "gsk_" in groq_key:
             try:
@@ -70,14 +59,25 @@ class FloodAI:
             except Exception as e:
                 print(f"Groq error: {e}")
         
-        if self.gemini_enabled:
-            try:
-                response = self.gemini_model.generate_content(prompt)
-                return response.text
-            except Exception as e:
-                print(f"Gemini error: {e}")
-                
+        gemini_text = self._try_gemini(prompt)
+        if gemini_text:
+            return gemini_text
+
         return self._get_fallback_insights(district_data, river_data)
+
+    def _try_gemini(self, prompt: str):
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if not gemini_key or gemini_key == "your-gemini-key" or len(gemini_key) <= 10:
+            return None
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            print(f"Gemini error: {e}")
+            return None
 
     def _get_fallback_insights(self, district_data, river_data):
         # Fallback logic if API key is missing

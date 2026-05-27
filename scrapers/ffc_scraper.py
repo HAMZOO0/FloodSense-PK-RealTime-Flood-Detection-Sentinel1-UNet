@@ -22,7 +22,10 @@ def clean_num(text):
 
 
 def get_ffc_data():
-    print("📡 Fetching FFC discharge page...")
+    print("[FFC] Fetching discharge page...", flush=True)
+
+    if not URL:
+        raise ValueError("Data_URL is not set in .env")
 
     res = requests.get(URL, headers=HEADERS, timeout=20)
     res.raise_for_status()

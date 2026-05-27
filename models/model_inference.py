@@ -1,4 +1,6 @@
 import os
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
 import cv2
 import torch
 import numpy as np
@@ -7,16 +9,32 @@ import io
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
+import rasterio
 
 
-# ── Load your trained model ───────────────────────────────────
-def load_flood_model(weights_path="models/best_model.pth"):
-    if not os.path.isabs(weights_path):
-        weights_path = os.path.join(os.path.dirname(__file__), weights_path)
+# ── Resolve weights ───────────────────────────────────────────
+def resolve_weights_path(weights_path=None):
+    root       = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = []
+    if weights_path:
+        candidates.append(weights_path)
+    candidates.extend([
+        os.path.join(root, "models", "best_flood_model.pth"),
+        os.path.join(root, "models", "best_model.pth"),
+        os.path.join(os.path.dirname(__file__), "best_flood_model.pth"),
+        os.path.join(os.path.dirname(__file__), "best_model.pth"),
+    ])
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    raise FileNotFoundError(
+        "Model weights not found. Place best_flood_model.pth in models/"
+    )
 
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Model weights not found: {weights_path}")
 
+# ── Load model ────────────────────────────────────────────────
+def load_flood_model(weights_path=None):
+    weights_path = resolve_weights_path(weights_path)
     model = smp.Unet(
         encoder_name="resnet34",
         encoder_weights=None,
@@ -24,7 +42,6 @@ def load_flood_model(weights_path="models/best_model.pth"):
         classes=1,
         activation=None
     )
-
     model.load_state_dict(
         torch.load(weights_path, map_location="cpu", weights_only=False)
     )
@@ -33,112 +50,84 @@ def load_flood_model(weights_path="models/best_model.pth"):
     return model
 
 
-# ── Preprocess GEE SAR PNG bytes → tensor ────────────────────
-def preprocess_image(image_bytes):
-    """
-    Converts raw PNG bytes downloaded from GEE into a tensor
-    that matches the distribution the model was trained on.
+# ── Preprocess ────────────────────────────────────────────────
+def normalize_image(img):
+    out    = np.zeros((3, img.shape[1], img.shape[2]), dtype=np.float32)
+    out[0] = (np.clip(img[4], -40, 10)  + 40) / 50.0   # VV
+    out[1] = (np.clip(img[5], -45, -5)  + 45) / 40.0   # VH
+    vv     = out[0] + 1e-8
+    vh     = out[1] + 1e-8
+    out[2] = np.clip(vh / vv, 0, 2) / 2.0               # ratio
+    return np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
 
-    THE CRITICAL FIX:
-    ─────────────────
-    Training data was a classified map:
-        pixel value 1 = land  → normalized to 0.0
-        pixel value 2 = flood → normalized to 1.0
+def preprocess_image(tif_bytes):
+    import io
 
-    GEE downloads SAR as a PNG scaled with min=-25dB, max=0dB:
-        dark pixels  = water/flood (low backscatter, ~-20 to -15 dB)
-        bright pixels = land/urban (high backscatter, ~-10 to 0 dB)
+    with rasterio.open(io.BytesIO(tif_bytes)) as src:
+        vv = src.read(1).astype(np.float32)   # (H, W)
 
-    Problem: dark=low value=0.0 in PNG → model sees 0.0 → predicts LAND
-             but dark should mean FLOOD (value 1.0 in training)
+    vv = cv2.resize(vv, (256, 256), interpolation=cv2.INTER_LINEAR)
 
-    Fix: INVERT the normalized image so dark→1.0 (flood) bright→0.0 (land)
-         This matches training distribution exactly.
-    """
-    # Open PNG and convert to grayscale
-    img = Image.open(io.BytesIO(image_bytes)).convert("L")
-    img = img.resize((128, 128))  # model input size
-    arr = np.array(img, dtype=np.float32)
+    # Display array for visualization
+    display_arr = (np.clip(vv, -25, 0) + 25) / 25.0  # (256, 256) in [0,1]
 
-    # Remove invalid pixels
-    arr = np.nan_to_num(arr, nan=0.0)
+    # Build 8-ch array so normalize_image() can run (it reads indices 4 & 5)
+    img_8ch = np.zeros((8, 256, 256), dtype=np.float32)
+    img_8ch[4] = vv   # VV
+    img_8ch[5] = vv   # VH approximated with VV
 
-    # Clip outliers using percentiles
-    valid = arr[arr > 0]
-    if len(valid) > 0:
-        p2  = np.percentile(valid, 2)
-        p98 = np.percentile(valid, 98)
-        arr = np.clip(arr, p2, p98)
+    img_norm = normalize_image(img_8ch)          # → (3, H, W)
+    img_norm = np.transpose(img_norm, (1, 2, 0)) # → (H, W, 3)
+    img_norm = cv2.resize(img_norm, (256, 256)).astype(np.float32)
 
-    # Normalize to 0–1
-    arr_min = arr.min()
-    arr_max = arr.max()
-    if arr_max - arr_min > 0:
-        arr = (arr - arr_min) / (arr_max - arr_min)
-    else:
-        arr = np.zeros_like(arr)
+    transform = A.Compose([ToTensorV2()])
+    tensor = transform(image=img_norm)["image"].unsqueeze(0)  # (1, 3, 256, 256) ✅
 
-    # ── CRITICAL FIX: INVERT ──────────────────────────────────
-    # Dark SAR pixels = water = should be 1.0 (flood in training)
-    # Bright SAR pixels = land = should be 0.0 (land in training)
-    arr = 1.0 - arr
-
-    # Make 3-channel input (model expects RGB-like)
-    arr3 = np.stack([arr, arr, arr], axis=-1).astype(np.float32)
-
-    # Apply same normalization used during training
-    transform = A.Compose([
-        A.Normalize(
-            mean=(0.485, 0.456, 0.406),
-            std=(0.229, 0.224, 0.225)
-        ),
-        ToTensorV2()
-    ])
-
-    tensor = transform(image=arr3)["image"].unsqueeze(0)
-    return tensor, arr  # return arr for visualization
+    return tensor, display_arr
 
 
-# ── Run flood segmentation ────────────────────────────────────
+# ── Predict ───────────────────────────────────────────────────
 def predict_flood(model, image_bytes, district_name, bbox):
     """
-    Runs U-Net on the GEE SAR tile.
-    Returns full analysis dict with flood mask and metrics.
+    Runs U-Net on a GEE SAR tile and returns a full analysis dict.
     """
-    # Preprocess
     tensor, display_arr = preprocess_image(image_bytes)
 
-    # Predict
     with torch.no_grad():
         output = torch.sigmoid(model(tensor))
 
-    pred_np   = output.cpu().numpy()[0, 0]   # (128, 128) probabilities
+    pred_np  = output.cpu().numpy()[0, 0]                   # (128, 128)
+    pred_256 = cv2.resize(
+        pred_np, (256, 256), interpolation=cv2.INTER_LINEAR
+    ).astype(np.float32)
 
-    # Resize prediction to 256x256 for display
-    pred_256  = cv2.resize(pred_np, (256, 256), interpolation=cv2.INTER_LINEAR)
-    pred_mask = pred_256 > 0.5   # binary flood mask
+    # ── FIX 2: zero out border margin in the prediction ──────────
+    # Suppresses edge artifacts caused by encoder zero-padding.
+    BORDER = 10   # pixels to suppress at each edge
+    pred_256[:BORDER, :]  = 0.0
+    pred_256[-BORDER:, :] = 0.0
+    pred_256[:, :BORDER]  = 0.0
+    pred_256[:, -BORDER:] = 0.0
 
-    # ── Calculate metrics ─────────────────────────────────────
+    pred_prob = pred_256
+    pred_mask = pred_prob > 0.5
+
+    # ── Metrics ──────────────────────────────────────────────────
     total_pixels = pred_mask.size
     flood_pixels = int(pred_mask.sum())
     water_pct    = (flood_pixels / total_pixels) * 100
 
-    # Area calculation from bounding box
     lon_diff          = bbox[2] - bbox[0]
     lat_diff          = bbox[3] - bbox[1]
     district_area_km2 = lon_diff * lat_diff * 111 * 111
     affected_km2      = district_area_km2 * (water_pct / 100)
 
-    # Risk score 1–10
     risk_score = min(10, max(1, round(water_pct / 10)))
-
-    # Risk label
-    if risk_score <= 3:
-        risk_label = "low"
-    elif risk_score <= 6:
-        risk_label = "medium"
-    else:
-        risk_label = "high"
+    risk_label = (
+        "low"    if risk_score <= 3 else
+        "medium" if risk_score <= 6 else
+        "high"
+    )
 
     print(f"  Water coverage : {water_pct:.2f}%")
     print(f"  Affected area  : {affected_km2:.1f} km²")
@@ -149,8 +138,9 @@ def predict_flood(model, image_bytes, district_name, bbox):
         "water_coverage_pct": round(water_pct, 2),
         "affected_area_km2":  round(affected_km2, 1),
         "flood_pixels":       flood_pixels,
-        "pred_mask":          pred_mask,          # 256x256 numpy bool array
-        "display_arr":        display_arr,        # preprocessed SAR for display
+        "pred_mask":          pred_mask,       # 256×256 bool array
+        "pred_prob":          pred_prob,       # 256×256 float array
+        "display_arr":        display_arr,     # preprocessed SAR for display
         "settlement_risk":    risk_label,
         "confidence":         "high",
         "model_used":         "U-Net ResNet34 (trained on Pakistan 2022 floods)"
