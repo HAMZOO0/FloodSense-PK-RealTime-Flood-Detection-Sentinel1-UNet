@@ -114,6 +114,7 @@ def render_unet_overlay(display_arr_128, pred_mask_256):
     return out.astype(np.uint8)
 
 
+    
 def render_sar_gray(display_arr_128):
     """Render the preprocessed SAR grayscale (from UNet preprocessing)."""
     sar_256 = cv2.resize(display_arr_128, (256, 256), interpolation=cv2.INTER_LINEAR)
