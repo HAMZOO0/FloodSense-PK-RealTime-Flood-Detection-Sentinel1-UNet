@@ -93,19 +93,20 @@ def preprocess_image(tif_bytes):
     return tensor, display_arr
 
 
-def render_unet_overlay(display_arr_128, pred_mask_256):
+def render_unet_overlay(display_arr, pred_mask):
     """
     Create one combined image: SAR grayscale + blue flood mask overlay.
+    Works with any dimensions (256, 512, etc.)
     """
-    # Align sizes
-    sar_256 = cv2.resize(display_arr_128, (256, 256), interpolation=cv2.INTER_LINEAR)
-
-    sar_uint8 = (np.clip(sar_256, 0, 1) * 255).astype(np.uint8)
+    h, w = display_arr.shape
+    
+    # Standardize SAR to uint8 RGB
+    sar_uint8 = (np.clip(display_arr, 0, 1) * 255).astype(np.uint8)
     sar_rgb = np.stack([sar_uint8, sar_uint8, sar_uint8], axis=-1)
 
     blue = np.array([26, 95, 212], dtype=np.float32)
     out = sar_rgb.astype(np.float32)
-    mask = pred_mask_256.astype(bool)
+    mask = pred_mask.astype(bool)
 
     # Alpha blend: flood pixels get blue overlay
     alpha = 0.65
@@ -115,33 +116,32 @@ def render_unet_overlay(display_arr_128, pred_mask_256):
 
 
     
-def render_sar_gray(display_arr_128):
-    """Render the preprocessed SAR grayscale (from UNet preprocessing)."""
-    sar_256 = cv2.resize(display_arr_128, (256, 256), interpolation=cv2.INTER_LINEAR)
-    sar_uint8 = (np.clip(sar_256, 0, 1) * 255).astype(np.uint8)
+def render_sar_gray(display_arr):
+    """Render the preprocessed SAR grayscale."""
+    sar_uint8 = (np.clip(display_arr, 0, 1) * 255).astype(np.uint8)
     return sar_uint8
 
 
-def render_prob_heatmap(pred_prob_256):
+def render_prob_heatmap(pred_prob):
     """Render probability heatmap as an RGB image (0..1 -> blue-red)."""
-    prob = np.clip(pred_prob_256, 0, 1)
+    prob = np.clip(pred_prob, 0, 1)
     img = (prob * 255).astype(np.uint8)
     # Use a fixed colormap for readability
     color = cv2.applyColorMap(img, cv2.COLORMAP_JET)  # BGR
     return cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
 
 
-def render_unet_one_diagram(display_arr_128, pred_prob_256, pred_mask_256):
+def render_unet_one_diagram(display_arr, pred_prob, pred_mask):
     """
-    One combined diagram:
+    One combined diagram (dynamic sizing):
     - background: SAR grayscale
     - color: probability heatmap
     - highlight: predicted flood mask (blue overlay)
     """
-    sar_gray = render_sar_gray(display_arr_128)  # 256x256 uint8
+    sar_gray = render_sar_gray(display_arr)
     sar_rgb = np.stack([sar_gray, sar_gray, sar_gray], axis=-1).astype(np.float32)
 
-    prob = np.clip(pred_prob_256, 0, 1)
+    prob = np.clip(pred_prob, 0, 1)
     prob_u8 = (prob * 255).astype(np.uint8)
     prob_color = cv2.applyColorMap(prob_u8, cv2.COLORMAP_JET)  # BGR
     prob_rgb = cv2.cvtColor(prob_color, cv2.COLOR_BGR2RGB).astype(np.float32)
@@ -150,7 +150,7 @@ def render_unet_one_diagram(display_arr_128, pred_prob_256, pred_mask_256):
     base = 0.45 * sar_rgb + 0.55 * prob_rgb
 
     # Highlight flood mask strongly
-    mask = pred_mask_256.astype(bool)
+    mask = pred_mask.astype(bool)
     blue = np.array([26, 95, 212], dtype=np.float32)
     alpha = 0.70
     base[mask] = (1 - alpha) * base[mask] + alpha * blue
@@ -230,6 +230,23 @@ def fetch_current_sar_image(bbox, date_start, date_end, size=256):
     print(f"  GeoTIFF downloaded: {len(res.content)} bytes")
     return res.content  # raw GeoTIFF bytes
 
+def fetch_2010_mask_image(mask_ee, bbox, size=256):
+    """
+    Fetches the 2010 binary mask as a PNG for visual comparison.
+    """
+    # mask_ee is 0 or 1. We'll visualize it as Blue.
+    vis_img = mask_ee.visualize(palette=["black", "blue"], min=0, max=1)
+    
+    url = vis_img.getDownloadURL({
+        "region": bbox,
+        "dimensions": size,
+        "format": "png",
+    })
+    
+    res = requests.get(url, timeout=60)
+    res.raise_for_status()
+    return res.content
+
 def main():
     st.title("FloodSense-PK: Unified Flood Dashboard (UNet + 2010 + FFC + Groq)")
 
@@ -247,7 +264,11 @@ def main():
     else:
         opts = sorted({x for x in gdf["__district_name__"].tolist()})
 
-    district = st.sidebar.selectbox("District", options=opts, index=0 if opts else 0)
+    district = st.sidebar.selectbox("District (Pre-defined)", options=opts, index=0 if opts else 0)
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Advanced: Search Custom Area")
+    search_name = st.sidebar.text_input("Enter Area Name (e.g. Taunsa, Charsadda)", help="Type a city or tehsil name. If found, it will override the district selection.")
 
     # Date range: used for Sentinel-1 current flood estimation
     default_end = datetime.now().date()
@@ -261,34 +282,103 @@ def main():
         run = st.button("Run analysis", type="primary", use_container_width=True)
 
     if not run:
-        st.info("Pick a district + date range, then press Run analysis.")
+        st.info("Pick a district or type a search name, then press Run analysis.")
         return
 
-    row = gdf[gdf["__district_name__"] == district].iloc[0]
-    geom = row["geometry"]
-    ee_geom = shapely_to_ee(geom)
-    bbox = list(geom.bounds)  # [minx, miny, maxx, maxy]
+    # ── Geometry Resolution ──
+    geom = None
+    display_name = district
+    
+    if search_name.strip():
+        with st.spinner(f"Searching for '{search_name}' in Pakistan districts..."):
+            # Use FAO GAUL Level 2, filtered specifically for Pakistan
+            pakistan_fc = ee.FeatureCollection("FAO/GAUL/2015/level2") \
+                            .filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
+            
+            # Try exact match first (case-insensitive-ish via capitalize)
+            search_term = search_name.strip()
+            match = pakistan_fc.filter(ee.Filter.eq("ADM2_NAME", search_term.capitalize()))
+            
+            # Fallback to partial match if exact fails
+            if match.size().getInfo() == 0:
+                match = pakistan_fc.filter(ee.Filter.stringContains("ADM2_NAME", search_term))
+            
+            # Last fallback: search ADM1 (Provinces) just in case
+            if match.size().getInfo() == 0:
+                prov_fc = ee.FeatureCollection("FAO/GAUL/2015/level1").filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
+                match = prov_fc.filter(ee.Filter.stringContains("ADM1_NAME", search_term))
 
-    # 1) Historical 2010 mask (computed once per session)
+            if match.size().getInfo() > 0:
+                feat = match.first()
+                geom_info = feat.geometry().getInfo()
+                from shapely.geometry import shape
+                geom = shape(geom_info)
+                # Try to get the official name from properties
+                try:
+                    props = feat.toDictionary().getInfo()
+                    official_name = props.get("ADM2_NAME") or props.get("ADM1_NAME") or search_term
+                    display_name = f"{official_name} (GEE Search)"
+                except:
+                    display_name = search_term
+                
+                st.sidebar.success(f"Verified: {display_name}")
+            else:
+                st.sidebar.warning(f"District '{search_name}' not found. Defaulting to '{district}'.")
+                row = gdf[gdf["__district_name__"] == district].iloc[0]
+                geom = row["geometry"]
+    else:
+        row = gdf[gdf["__district_name__"] == district].iloc[0]
+        geom = row["geometry"]
+
+    ee_geom = shapely_to_ee(geom)
+    district = display_name # Use the searched name for display
+    
+    # Calculate bbox with a 15% buffer for better geographic context
+    minx, miny, maxx, maxy = geom.bounds
+    w_deg = maxx - minx
+    h_deg = maxy - miny
+    buffer_percent = 0.15
+    bbox = [
+        minx - w_deg * buffer_percent, 
+        miny - h_deg * buffer_percent, 
+        maxx + w_deg * buffer_percent, 
+        maxy + h_deg * buffer_percent
+    ]
+    
+    # ── Dynamic Resolution Calculation ──
+    # Goal: ~80 meters per pixel for reliable UNet detection
+    # 1 degree is roughly 111,000 meters.
+    target_res_m = 80
+    pixels_w = int((w_deg * 1.3) * 111000 / target_res_m)
+    pixels_h = int((h_deg * 1.3) * 111000 / target_res_m)
+    
+    # Constrain to reasonable limits for GEE/Memory (min 256, max 1024)
+    final_size_w = max(256, min(1024, pixels_w))
+    final_size_h = max(256, min(1024, pixels_h))
+    # We'll use the larger dimension as a square for the UNet tiles
+    final_size = max(final_size_w, final_size_h)
+
+    # 1) Historical 2010 mask
     if "hist_flood_mask" not in st.session_state:
-        with st.spinner("Computing 2010 flood mask (Landsat via GEE)... this can take a while"):
+        with st.spinner("Computing 2010 flood mask (Landsat via GEE)..."):
             pakistan_bbox = ee.Geometry.BBox(60.0, 23.0, 77.5, 37.5)
             hist_flood_mask, _, _ = get_flood_mask(pakistan_bbox)
             st.session_state["hist_flood_mask"] = hist_flood_mask
 
-    with st.spinner("Computing 2010 flood % for selected district..."):
+    with st.spinner("Computing 2010 flood %..."):
         pct_2010 = flood_percent_for_district(ee_geom, st.session_state["hist_flood_mask"])
 
     # 2) Current (Sentinel-1 + U-Net)
     model = load_model_cached()
-    with st.spinner("Fetching Sentinel-1 SAR tile..."):
+    with st.spinner(f"Fetching Sentinel-1 SAR ({final_size}px)..."):
         sar_bytes = fetch_current_sar_image(
             bbox=bbox,
             date_start=str(start_date),
             date_end=str(end_date),
+            size=final_size
         )
 
-    with st.spinner("Running U-Net flood detection..."):
+    with st.spinner("Running Tiled UNet analysis..."):
         unet_result = predict_flood(model, sar_bytes, district, bbox)
 
     pct_current = unet_result["water_coverage_pct"]
@@ -307,7 +397,7 @@ def main():
     matched_station = match_station_to_district(district, river_flows)
 
     # 4) Groq AI insights
-    with st.spinner("Generating Groq AI strategic insights..."):
+    with st.spinner("Generating AI strategic insights..."):
         ai = FloodAI()
         summary_for_ai = [
             {
@@ -321,72 +411,123 @@ def main():
         ]
         insights = ai.generate_insights(summary_for_ai, river_flows)
 
-    # 5) Visuals (non-overlapping)
+    # 5) Visuals
     sar_gray = render_sar_gray(unet_result["display_arr"])
     overlay_img = render_unet_overlay(unet_result["display_arr"], unet_result["pred_mask"])
     prob_heatmap = render_prob_heatmap(unet_result["pred_prob"])
+
+    with st.spinner("Aligning 2010 historical visuals..."):
+        hist_mask_bytes = fetch_2010_mask_image(
+            st.session_state["hist_flood_mask"],
+            bbox=bbox,
+            size=final_size
+        )
 
     st.divider()
 
     # Clean, non-overlapping UI using tabs
     t1, t2, t3, t4 = st.tabs(["Overview", "Detection", "River Flows", "AI Insights"])
 
-    with t1:
-        st.subheader("District comparison (Current vs 2010)")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Current flood %", f"{pct_current:.2f}%")
-        c2.metric("2010 new flood %", f"{pct_2010:.2f}%")
-        c3.metric("Risk score (1–10)", f"{risk_score}/10")
 
+    with t1:
+        st.subheader("Flood Severity Comparison: 2010 vs. Current")
+        st.markdown("""
+        Comparison between the historical maximum flood extent (2010) and the current situation detected by AI. 
+        Blue areas indicate standing water.
+        """)
+        
+        # Standardized height for professional alignment
+        IMG_HEIGHT = 450
+        
+        # ── Visual Comparison Section ──
+        col_img1, col_img2 = st.columns(2)
+        with col_img1:
+            st.markdown("#### **[A] 2010 Historical Baseline**")
+            st.image(hist_mask_bytes, caption="Satellite: Landsat-5 | Method: MNDWI", use_container_width=True)
+            st.info("2010 Context: This represents the peak flood footprint during the 2010 disaster in Pakistan.")
+        with col_img2:
+            st.markdown(f"#### **[B] Current Situation ({start_date})**")
+            st.image(overlay_img, caption="Satellite: Sentinel-1 SAR | Method: UNet AI", use_container_width=True)
+            st.info("Live Status: Current water detection based on latest available radar imagery.")
+
+        st.divider()
+
+        # ── Metrics Section ──
+        st.subheader("Statistical Analysis")
+        c1, c2, c3 = st.columns(3)
+        
+        c1.metric(
+            "2010 HISTORICAL %", 
+            f"{pct_2010:.2f}%",
+            help="Percentage of the district area flooded during the peak of the 2010 disaster."
+        )
+        c2.metric(
+            "CURRENT FLOOD %", 
+            f"{pct_current:.2f}%",
+            help="Current percentage of the district area identified as flooded by the UNet AI model."
+        )
+        
         delta = None
         try:
             delta = float(pct_current) - float(pct_2010)
         except Exception:
             delta = None
+            
         if delta is not None:
-            st.metric("Δ flood % (current - 2010)", f"{delta:+.2f}%")
+            c3.metric(
+                "DELTA SEVERITY", 
+                f"{delta:+.2f}%", 
+                delta=f"{delta:+.2f}%", 
+                delta_color="inverse",
+                help="The difference in flood extent (Current % - 2010 %). A negative value indicates the current flood is less severe than 2010."
+            )
 
-        st.write(f"Settlement risk level: **{settlement_risk.upper()}**")
+        st.markdown(f"""
+        ### **Executive Summary**
+        *   **Extent:** The current flood extent is **{pct_current:.2f}%**, which is **{abs(delta):.2f}% {'higher' if delta > 0 else 'lower'}** than the 2010 benchmark.
+        *   **Scale:** Current flooding is roughly **{ (pct_current / (pct_2010 if pct_2010 > 0 else 1)) * 100:.1f}%** as severe as the 2010 disaster.
+        *   **Impact Level:** The system has classified this district as **{settlement_risk.upper()}** risk.
+        """)
+        
         st.progress(min(1.0, risk_score / 10.0))
-        st.caption(f"Current SAR period: {start_date} → {end_date} | 2010: {FLOOD_START} → {FLOOD_END}")
 
-        st.markdown("### River status for this district")
+        st.divider()
+
+        st.markdown("### Local River Monitoring")
         if matched_station:
             st.success(
-                f"{matched_station['station']} ({matched_station['river']}) → **{matched_station['status']}**"
+                f"**Station:** {matched_station['station']} | **River:** {matched_station['river']} | **Status:** {matched_station['status']}"
             )
             st.caption(
-                f"Inflow: {matched_station.get('inflow')} | Outflow: {matched_station.get('outflow')}"
+                f"Real-time Discharge (Cusecs) → Inflow: {matched_station.get('inflow')} | Outflow: {matched_station.get('outflow')}"
             )
         else:
-            st.info("No direct station match found from the scraper names.")
+            st.info("No monitoring station directly associated with this district name.")
 
     with t2:
-        st.subheader("UNet image detection (one diagram)")
-        st.caption("Model probability is shown as color, flood mask highlighted in blue.")
-
-        one_diagram = render_unet_one_diagram(
-            unet_result["display_arr"], unet_result["pred_prob"], unet_result["pred_mask"]
-        )
+        st.subheader("UNet Deep Learning Analysis")
+        st.caption("Detailed breakdown of AI model outputs and confidence levels.")
 
         col_a, col_b = st.columns(2)
+        
+        # Ensure consistent sizing in detection tab as well
         with col_a:
-            st.image(one_diagram, caption="SAR + Probability + Flood Mask (UNet)", use_container_width=True)
-        with col_b:
-            st.image(
-                unet_result["pred_mask"].astype(np.uint8) * 255,
-                caption="Binary flood mask (0/255)",
-                use_container_width=True,
+            st.markdown("#### **Unified Detection Mask**")
+            one_diagram = render_unet_one_diagram(
+                unet_result["display_arr"], unet_result["pred_prob"], unet_result["pred_mask"]
             )
+            st.image(one_diagram, caption="Background: SAR | Red-Yellow: Prob | Blue: Mask", use_container_width=True)
+        
+        with col_b:
+            st.markdown("#### **Confidence Heatmap**")
+            st.image(prob_heatmap, caption="Probability Score (0.0 to 1.0)", use_container_width=True)
 
-        st.markdown("### Flood probability heatmap (0..1)")
-        st.image(prob_heatmap, caption="Model confidence heatmap", use_container_width=True)
-
-        st.markdown("### Key metrics")
+        st.divider()
+        st.markdown("### Model Performance Metrics")
         m1, m2, m3 = st.columns(3)
-        m1.metric("Water coverage", f"{pct_current:.2f}%")
-        m2.metric("Affected area", f"{unet_result['affected_area_km2']:.1f} km²")
-        m3.metric("Model", unet_result.get("model_used", "UNet ResNet34"))
+        m1.metric("Pixel Water Coverage", f"{pct_current:.2f}%")
+        m2.metric("Total Affected Area", f"{unet_result['affected_area_km2']:.1f} km²")
+        m3.metric("AI Architecture", "ResNet34-UNet")
 
     with t3:
         st.subheader("FFC river discharge (scraped)")

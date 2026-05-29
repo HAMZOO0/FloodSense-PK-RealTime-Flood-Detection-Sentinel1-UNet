@@ -74,6 +74,14 @@ Batch run writes:
 - `data/json/river_flows.json`
 - `data/json/ai_insights.json`
 
+## Key Features
+
+- **Smart Resolution Scaling:** Image dimensions are calculated dynamically based on a target resolution of **80m/pixel**. This ensures that both massive districts (like D.G. Khan) and small districts (like Swat) are covered in full detail without losing pixel density.
+- **High-Res Tiled Inference:** To maintain UNet model accuracy on large areas, the system automatically slices high-res imagery into **256x256 pixel tiles**, processes them individually, and stitches them back into a unified flood mask.
+- **Geographic Buffering:** A **15% spatial buffer** is applied to all district bounding boxes to provide better geographic context and ensure boundary water is captured.
+- **Professional Dashboard UI:** Clean, emoji-free technical interface with **interactive tooltips** (e.g., hovering over Delta Severity shows the exact calculation: `Current % - 2010 %`).
+- **Standardized Comparative Analysis:** Side-by-side visual and statistical comparison between the current situation and the historical 2010 disaster baseline.
+
 ## Project structure
 - `streamlit_app.py` : main UI (single dashboard)
 - `main.py` : optional batch pipeline
@@ -87,18 +95,36 @@ Batch run writes:
 - Computing the **2010 Landsat mask** can take a while. In Streamlit, it’s cached in your session (so it won’t repeat every click).
 - UNet inference runs after the SAR thumbnail is fetched from GEE.
 
+### 2. Satellite Data Sources
+
+#### **[A] Sentinel-1 SAR (Current Detection)**
+*   **Purpose:** Real-time flood detection.
+*   **Agency:** European Space Agency (ESA).
+*   **Key Specs:** C-band Synthetic Aperture Radar, 10m resolution, sees through clouds.
+*   **Detection Logic:** UNet (ResNet34) Deep Learning model.
+
+> **[INSERT SENTINEL-1 SATELLITE IMAGE/SCREENSHOT HERE]**
+
+#### **[B] Landsat-5 (Historical 2010 Baseline)**
+*   **Purpose:** 2010 flood extent reconstruction.
+*   **Agency:** USGS / NASA.
+*   **Key Specs:** Optical/Thermal sensor, 30m resolution.
+*   **Detection Logic:** MNDWI (Modified Normalized Difference Water Index).
+
+> **[INSERT LANDSAT-5 SATELLITE IMAGE/SCREENSHOT HERE]**
+
 ## Technical Deep Dive
 
 ### 1. The UNet Model: Full Image Flow
 The lifecycle of a single flood detection prediction follows these steps:
-1.  **Request (GEE):** When a district and date are selected, the system fetches **Sentinel-1 SAR** imagery (VV band) via Google Earth Engine.
-2.  **Data Form:** Data arrives as **GeoTIFF** bytes (matrix of radar backscatter values in dB).
-3.  **Preprocessing:**
-    *   **Normalization:** Raw dB values (approx. -25 to 0) are scaled to [0, 1].
-    *   **Synthetic RGB:** Creates a 3-channel tensor: Channel 1 (VV), Channel 2 (VH approx), Channel 3 (VH/VV ratio).
-    *   **Resizing:** Imagery is standardized to **256x256 pixels**.
-4.  **Inference:** The tensor is fed into a **UNet (ResNet34)** model trained on Pakistan-specific flood events.
-5.  **Output:** A probability map is generated. Pixels > 0.5 are classified as **Flood** (blue overlay).
+1.  **Request (GEE):** When a district and date are selected, the system calculates a **Dynamic Resolution** (targeting 80m/pixel) and fetches **Sentinel-1 SAR** imagery via Google Earth Engine.
+2.  **Data Form:** Data arrives as **GeoTIFF** bytes.
+3.  **Preprocessing & Tiling:**
+    *   **Normalization:** Raw dB values are scaled to [0, 1].
+    *   **Tiling:** If the image is larger than 256px (e.g., 1024px), it is sliced into multiple **256x256 tiles**.
+    *   **Synthetic RGB:** Each tile is converted to a 3-channel tensor (VV, VH approx, VH/VV ratio).
+4.  **Inference:** Each tile is processed by the **UNet (ResNet34)** model.
+5.  **Stitching & Output:** Tiles are stitched back together to create a unified probability map. Pixels > 0.5 are classified as **Flood**.
 
 ### 2. FFC (Federal Flood Commission) Data
 1.  **Source:** Official FFC discharge web portal.

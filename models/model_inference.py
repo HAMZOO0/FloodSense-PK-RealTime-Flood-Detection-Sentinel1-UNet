@@ -60,61 +60,81 @@ def normalize_image(img):
     out[2] = np.clip(vh / vv, 0, 2) / 2.0               # ratio
     return np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
 
-def preprocess_image(tif_bytes):
-    import io
+def preprocess_image_tile(vv_tile):
+    """
+    Accepts a 256x256 VV slice and prepares a 3-ch tensor for UNet.
+    """
+    # Channel 0: normalized VV [-40, 10] → [0, 1]
+    ch0 = (np.clip(vv_tile, -40, 10) + 40) / 50.0
 
-    with rasterio.open(io.BytesIO(tif_bytes)) as src:
-        vv = src.read(1).astype(np.float32)   # (H, W)
+    # Channel 1: VH approximation (VH ≈ VV - 6dB empirically)
+    vh_approx = vv_tile - 6.0
+    ch1 = (np.clip(vh_approx, -45, -5) + 45) / 40.0
 
-    vv = cv2.resize(vv, (256, 256), interpolation=cv2.INTER_LINEAR)
+    # Channel 2: VH/VV ratio in linear scale
+    vv_lin = np.power(10.0, np.clip(vv_tile, -40, 0) / 10.0)
+    vh_lin = np.power(10.0, np.clip(vh_approx, -45, -5) / 10.0)
+    ratio  = np.clip(vh_lin / (vv_lin + 1e-8), 0.0, 2.0) / 2.0
 
-    # Display array for visualization
-    display_arr = (np.clip(vv, -25, 0) + 25) / 25.0  # (256, 256) in [0,1]
+    img_norm = np.stack([ch0, ch1, ratio], axis=-1).astype(np.float32)  # (256,256,3)
 
-    # Build 8-ch array so normalize_image() can run (it reads indices 4 & 5)
-    img_8ch = np.zeros((8, 256, 256), dtype=np.float32)
-    img_8ch[4] = vv   # VV
-    img_8ch[5] = vv   # VH approximated with VV
+    transform = ToTensorV2()
+    tensor = transform(image=img_norm)["image"].unsqueeze(0)  # (1, 3, 256, 256)
+    return tensor
 
-    img_norm = normalize_image(img_8ch)          # → (3, H, W)
-    img_norm = np.transpose(img_norm, (1, 2, 0)) # → (H, W, 3)
-    img_norm = cv2.resize(img_norm, (256, 256)).astype(np.float32)
-
-    transform = A.Compose([ToTensorV2()])
-    tensor = transform(image=img_norm)["image"].unsqueeze(0)  # (1, 3, 256, 256) ✅
-
-    return tensor, display_arr
-
-
-# ── Predict ───────────────────────────────────────────────────
 def predict_flood(model, image_bytes, district_name, bbox):
     """
-    Runs U-Net on a GEE SAR tile and returns a full analysis dict.
+    Runs Tiled U-Net on a GEE SAR tile.
+    Supports larger images (e.g. 512x512) by slicing into 256x256 tiles.
     """
-    tensor, display_arr = preprocess_image(image_bytes)
+    with rasterio.open(io.BytesIO(image_bytes)) as src:
+        vv_full = src.read(1).astype(np.float32)  # (H_full, W_full)
 
-    with torch.no_grad():
-        output = torch.sigmoid(model(tensor))
+    h_full, w_full = vv_full.shape
+    TILE_SIZE = 256
 
-    pred_np  = output.cpu().numpy()[0, 0]                   # (128, 128)
-    pred_256 = cv2.resize(
-        pred_np, (256, 256), interpolation=cv2.INTER_LINEAR
-    ).astype(np.float32)
+    # Create empty canvases for the results
+    pred_prob_full = np.zeros((h_full, w_full), dtype=np.float32)
 
-    # ── FIX 2: zero out border margin in the prediction ──────────
-    # Suppresses edge artifacts caused by encoder zero-padding.
-    BORDER = 10   # pixels to suppress at each edge
-    pred_256[:BORDER, :]  = 0.0
-    pred_256[-BORDER:, :] = 0.0
-    pred_256[:, :BORDER]  = 0.0
-    pred_256[:, -BORDER:] = 0.0
+    # Tiled Inference Loop
+    for y in range(0, h_full, TILE_SIZE):
+        for x in range(0, w_full, TILE_SIZE):
+            # Extract tile
+            vv_tile = vv_full[y:y+TILE_SIZE, x:x+TILE_SIZE]
 
-    pred_prob = pred_256
-    pred_mask = pred_prob > 0.5
+            # Handle edge cases (if image is not divisible by 256)
+            if vv_tile.shape[0] != TILE_SIZE or vv_tile.shape[1] != TILE_SIZE:
+                vv_tile = cv2.copyMakeBorder(
+                    vv_tile, 0, TILE_SIZE-vv_tile.shape[0], 0, TILE_SIZE-vv_tile.shape[1], 
+                    cv2.BORDER_CONSTANT, value=0
+                )
+
+            # Preprocess and Predict
+            tensor = preprocess_image_tile(vv_tile)
+            with torch.no_grad():
+                output = torch.sigmoid(model(tensor))
+
+            tile_prob = output.cpu().numpy()[0, 0]
+
+            # ── Border Margin Fix ──
+            BORDER = 8
+            tile_prob[:BORDER, :] = 0.0
+            tile_prob[-BORDER:, :] = 0.0
+            tile_prob[:, :BORDER] = 0.0
+            tile_prob[:, -BORDER:] = 0.0
+
+            # Stitch back
+            h_rem = min(TILE_SIZE, h_full - y)
+            w_rem = min(TILE_SIZE, w_full - x)
+            pred_prob_full[y:y+h_rem, x:x+w_rem] = tile_prob[:h_rem, :w_rem]
+
+    # Final outputs
+    pred_mask_full = pred_prob_full > 0.5
+    display_arr_full = (np.clip(vv_full, -25, 0) + 25) / 25.0
 
     # ── Metrics ──────────────────────────────────────────────────
-    total_pixels = pred_mask.size
-    flood_pixels = int(pred_mask.sum())
+    total_pixels = pred_mask_full.size
+    flood_pixels = int(pred_mask_full.sum())
     water_pct    = (flood_pixels / total_pixels) * 100
 
     lon_diff          = bbox[2] - bbox[0]
@@ -129,19 +149,18 @@ def predict_flood(model, image_bytes, district_name, bbox):
         "high"
     )
 
-    print(f"  Water coverage : {water_pct:.2f}%")
-    print(f"  Affected area  : {affected_km2:.1f} km²")
-    print(f"  Risk score     : {risk_score}/10 ({risk_label})")
+    print(f"  [Tiled] Water coverage : {water_pct:.2f}%")
+    print(f"  [Tiled] Affected area  : {affected_km2:.1f} km²")
 
     return {
         "risk_score":         risk_score,
         "water_coverage_pct": round(water_pct, 2),
         "affected_area_km2":  round(affected_km2, 1),
         "flood_pixels":       flood_pixels,
-        "pred_mask":          pred_mask,       # 256×256 bool array
-        "pred_prob":          pred_prob,       # 256×256 float array
-        "display_arr":        display_arr,     # preprocessed SAR for display
+        "pred_mask":          pred_mask_full,
+        "pred_prob":          pred_prob_full,
+        "display_arr":        display_arr_full,
         "settlement_risk":    risk_label,
         "confidence":         "high",
-        "model_used":         "U-Net ResNet34 (trained on Pakistan 2022 floods)"
+        "model_used":         "U-Net ResNet34 (Tiled Inference Mode)"
     }
