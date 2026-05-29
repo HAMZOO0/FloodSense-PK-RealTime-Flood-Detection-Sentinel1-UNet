@@ -30,41 +30,58 @@ def get_ffc_data():
         return []
 
     # Extract all station blocks: var s = { ... };
-    pattern = r'var s = \{(.*?)\};'
-    matches = re.findall(pattern, html, re.DOTALL)
+    pattern = r'var\s+s\s*=\s*\{(.*?)\};'
+    matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
 
     data = []
     for m in matches:
         def field(key):
-            # Handles both "key": and key: (unquoted keys in JS objects)
-            r = re.search(rf'["\']?{key}["\']?:\s*["\']([^"\']*)["\']', m)
-            return r.group(1) if r else None
+            # Extremely aggressive extractor for key: "value" or "key": "value"
+            # Handles varying spaces and quote types
+            patterns = [
+                rf'["\']?{key}["\']?\s*:\s*["\']([^"\']*)["\']', # quoted value
+                rf'["\']?{key}["\']?\s*:\s*([^,\n\}}\s]*)'        # unquoted value
+            ]
+            for p in patterns:
+                r = re.search(p, m)
+                if r and r.group(1): return r.group(1).strip()
+            return None
 
-        name      = field("name")
-        status    = field("status")
-        river     = field("area_name")
-        recorded  = field("recording_time")
+        name      = field("name") or "Unknown Station"
+        status    = field("status") or "NORMAL"
+        river     = field("area_name") or "Unknown River"
+        recorded  = field("recording_time") or "N/A"
+        lat       = field("lat")
+        lon       = field("lon")
 
-        # Parse gauges array for Inflow/Outflow and Trends
-        # Format: {type:"OUTFLOW",discharge:"43,700",trend:"Falling"}
-        gauges_raw = re.findall(
-            r'\{["\']?type["\']?:\s*["\']([^"\']*)["\']\s*,\s*["\']?discharge["\']?:\s*["\']([^"\']*)["\']\s*,\s*["\']?trend["\']?:\s*["\']([^"\']*)["\']',
-            m
-        )
+        # Robustly find all gauge objects { type: "...", discharge: "...", trend: "..." }
+        # Then extract values from each object
+        gauge_objects = re.findall(r'\{([^{}]+)\}', m)
         
         inflow = 0
         outflow = 0
         inflow_trend = "Steady"
         outflow_trend = "Steady"
 
-        for g_type, g_disc, g_trend in gauges_raw:
+        for obj_str in gauge_objects:
+            def obj_field(key):
+                pat = rf'["\']?{key}["\']?\s*:\s*["\']([^"\']*)["\']'
+                res = re.search(pat, obj_str)
+                return res.group(1) if res else None
+            
+            g_type = obj_field("type")
+            g_disc = obj_field("discharge")
+            g_trend = obj_field("trend")
+
+            if not g_type: continue
+            
             val = clean_num(g_disc)
             if g_type.upper() == "INFLOW":
                 inflow = val
-                inflow_trend = g_trend
+                inflow_trend = g_trend or "Steady"
             elif g_type.upper() == "OUTFLOW":
                 outflow = val
-                outflow_trend = g_trend
+                outflow_trend = g_trend or "Steady"
 
         # Normalize status to match dashboard expectations
         std_status = "UNKNOWN"

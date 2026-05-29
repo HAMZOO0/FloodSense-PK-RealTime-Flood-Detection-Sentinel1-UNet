@@ -13,6 +13,7 @@ import cv2
 from shapely.geometry import shape
 
 import matplotlib.pyplot as plt
+import pydeck as pdk
 
 from scrapers.ffc_scraper import get_ffc_data
 from engine.ai_alerts import FloodAI
@@ -250,8 +251,43 @@ def fetch_2010_mask_image(mask_ee, bbox, size=256):
     res.raise_for_status()
     return res.content
 
+# ── Station Coordinate Mapping ──
+STATION_COORDS = {
+    "Tarbela Dam": [34.08, 72.69], "Nowshera": [34.01, 71.97], "Besham": [34.92, 72.88],
+    "Kala Bagh": [32.96, 71.54], "Chashma": [32.44, 71.37], "Taunsa": [30.52, 70.84],
+    "Guddu": [28.42, 69.70], "Sukkur": [27.71, 68.85], "Kotri": [25.37, 68.31],
+    "Mangla Dam": [33.14, 73.64], "Marala": [32.67, 74.47], "Khanki": [32.41, 73.79],
+    "Qadirabad": [32.31, 73.53], "Trimmu": [31.14, 72.15], "Punjnad": [29.35, 71.02],
+    "Balloki": [31.22, 73.86], "Sidhnai": [30.57, 72.08], "Jassar": [32.11, 74.96],
+    "Sulemanki": [30.37, 73.87], "Islam": [29.83, 72.55], "Ganda Singh Wala": [31.11, 74.46]
+}
+
+# ── River Flow Topology (Upstream -> Downstream) ──
+RIVER_PATHS = [
+    # Indus Main
+    ["Tarbela Dam", "Besham", "Kala Bagh", "Chashma", "Taunsa", "Guddu", "Sukkur", "Kotri"],
+    # Kabul link
+    ["Nowshera", "Kala Bagh"],
+    # Jhelum link
+    ["Mangla Dam", "Trimmu"],
+    # Chenab link
+    ["Marala", "Khanki", "Qadirabad", "Trimmu", "Punjnad"],
+    # Ravi link
+    ["Jassar", "Balloki", "Sidhnai", "Punjnad"],
+    # Sutlej link
+    ["Ganda Singh Wala", "Sulemanki", "Islam", "Punjnad"],
+    # Panjnad to Indus
+    ["Punjnad", "Guddu"]
+]
+
 def main():
-    st.title("FloodSense-PK: Unified Flood Dashboard (UNet + 2010 + FFC + Groq)")
+    # ── Professional Executive Header ──
+    st.markdown("""
+        <div style='padding: 10px; border-radius: 10px; background-color: rgba(51, 102, 204, 0.05); border-left: 5px solid #3366cc; margin-bottom: 20px;'>
+            <h1 style='margin: 0; padding: 0; font-size: 2.2em; color: #ffffff;'>FloodSense-PK</h1>
+            <p style='margin: 0; padding: 0; font-size: 1.1em; color: #8aa5ff; font-weight: 300;'>National Flood Intelligence & Early Warning System</p>
+        </div>
+    """, unsafe_allow_html=True)
 
     if "gee_inited" not in st.session_state:
         st.session_state["gee_inited"] = init_gee()
@@ -622,21 +658,92 @@ def main():
                 ax.grid(True, alpha=0.15)
                 st.pyplot(fig)
 
-            st.divider()
+            st.markdown("#### **Native Pakistan River Monitoring Map**")
+            st.caption("Interactive hydraulic network visualizing current barrage and dam status.")
+
+            # Prepare data for Pydeck Map
+            map_data = []
+            for d in river_flows:
+                # Use hardcoded coords if scraper lacks them
+                coords = STATION_COORDS.get(d["station"])
+                if coords:
+                    color = [16, 150, 24, 200] # Normal (Green)
+                    if d["status"] == "HIGH": color = [255, 153, 0, 200] # Warning (Orange)
+                    elif d["status"] == "EXTREME": color = [255, 0, 0, 200] # Critical (Red)
+                    
+                    map_data.append({
+                        "name": d["station"],
+                        "river": d["river"],
+                        "inflow": d["inflow"],
+                        "outflow": d["outflow"],
+                        "status": d["status"],
+                        "latitude": coords[0],
+                        "longitude": coords[1],
+                        "color": color
+                    })
             
-            st.markdown("#### **Interactive River Network (PMD/FFD)**")
-            st.caption("Official real-time river state map provided by the Flood Forecasting Division (PMD).")
-            
-            # Embed the FFD map in an iframe
-            # Note: Some government sites may block iframe embedding. 
-            # We provide a direct link fallback.
-            st.components.v1.iframe("https://ffd.pmd.gov.pk/river-state", height=600, scrolling=True)
-            
+            if map_data:
+                df_map = pd.DataFrame(map_data)
+                
+                # Convert RIVER_PATHS names to coordinate paths
+                flow_paths = []
+                for path_names in RIVER_PATHS:
+                    coords = []
+                    for name in path_names:
+                        if name in STATION_COORDS:
+                            # Pydeck expects [lon, lat]
+                            c = STATION_COORDS[name]
+                            coords.append([c[1], c[0]])
+                    if len(coords) > 1:
+                        flow_paths.append({"path": coords, "name": "River Segment"})
+
+                # 1. Base Layer (Pakistan Outline)
+                base_layer = pdk.Layer(
+                    "GeoJsonLayer",
+                    gdf,
+                    opacity=0.05,
+                    stroked=True,
+                    filled=True,
+                    get_fill_color=[150, 150, 150],
+                    get_line_color=[255, 255, 255],
+                )
+
+                # 2. Path Layer (The Links)
+                path_layer = pdk.Layer(
+                    "PathLayer",
+                    flow_paths,
+                    width_min_pixels=3,
+                    get_path="path",
+                    get_color=[51, 102, 204, 180], # Blue flow links
+                    pickable=True,
+                )
+
+                # 3. Station Layer (The Points)
+                station_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    df_map,
+                    get_position=["longitude", "latitude"],
+                    get_color="color",
+                    get_radius=15000,
+                    pickable=True,
+                )
+                
+                view_state = pdk.ViewState(latitude=30.0, longitude=70.0, zoom=5, pitch=0)
+                
+                st.pydeck_chart(pdk.Deck(
+                    map_style=None,
+                    initial_view_state=view_state,
+                    layers=[base_layer, path_layer, station_layer],
+                    tooltip={"text": "{name} ({river})\nStatus: {status}\nInflow: {inflow}\nOutflow: {outflow}"}
+                ))
+            else:
+                st.warning("No station coordinates available to render the map.")
+
             st.markdown(f"""
-            <div style='text-align: center; padding: 10px;'>
+            <div style='text-align: right; padding: 10px;'>
                 <a href='https://ffd.pmd.gov.pk/river-state' target='_blank'>
-                    <button style='background-color: #008CBA; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer;'>
-                        Open Official Map in New Tab
+                    <button style='background-color: transparent; color: #8aa5ff; padding: 5px 15px; border: 1px solid #8aa5ff; border-radius: 5px; cursor: pointer; font-size: 0.8em;'>
+                        View FFD Source Page ↗
                     </button>
                 </a>
             </div>
