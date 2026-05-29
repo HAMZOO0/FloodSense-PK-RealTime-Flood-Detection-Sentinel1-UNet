@@ -9,9 +9,20 @@ load_dotenv()
 class FloodAI:
     def __init__(self):
         self.gemini_enabled = False
-        self.gemini_model = None
+        
+        # Gemini Init (New Primary)
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key and len(gemini_key) > 10:
+            try:
+                import google.generativeai as genai
+                genai.configure(api_key=gemini_key.strip())
+                self.gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+                self.gemini_enabled = True
+            except Exception as e:
+                print(f"⚠️ Gemini configuration failed: {e}")
+                self.gemini_enabled = False
 
-        # Groq Init (preferred)
+        # Groq Init (Secondary)
         groq_key = os.getenv("GROQ_API_KEY")
         if groq_key and "gsk_" in groq_key:
             try:
@@ -32,23 +43,28 @@ class FloodAI:
         Generates strategic insights based on current vs historical flood data and river flows.
         """
         prompt = f"""
-        Analyze the following flood data for Pakistan and provide 4 professional strategic insights for disaster management.
+        Act as a Disaster Management Expert. Analyze the Pakistan flood data below and provide 3 PUNCHY, ACTIONABLE strategic insights.
         
-        Compare Current Flood % (UNet Sentinel-1) with Historical 2010 Flood % (Landsat).
+        FORMAT INSTRUCTIONS:
+        - Use very short bullet points.
+        - Start each insight with a clear category like [RELIEF], [INFRASTRUCTURE], or [PREDICTION].
+        - Max 2 sentences per insight.
+        - Be direct and professional.
         
         District Data:
         {json.dumps(district_data, indent=2)}
         
-        Live River Flow Data:
+        River Flow Data:
         {json.dumps(river_data, indent=2)}
-        
-        Provide concise, actionable insights focusing on:
-        1. Severity compared to 2010 historical levels.
-        2. Immediate relief priorities based on current inundation.
-        3. Risks to infrastructure from river flows.
-        4. Prediction for downstream Sindh districts.
         """
         
+        if self.gemini_enabled:
+            try:
+                response = self.gemini_model.generate_content(prompt)
+                return response.text
+            except Exception as e:
+                print(f"Gemini error: {e}")
+
         if self.groq_enabled:
             try:
                 chat_completion = self.groq_client.chat.completions.create(
@@ -58,10 +74,6 @@ class FloodAI:
                 return chat_completion.choices[0].message.content
             except Exception as e:
                 print(f"Groq error: {e}")
-        
-        gemini_text = self._try_gemini(prompt)
-        if gemini_text:
-            return gemini_text
 
         return self._get_fallback_insights(district_data, river_data)
 

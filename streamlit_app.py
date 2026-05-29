@@ -10,6 +10,7 @@ import requests
 import ee
 import geopandas as gpd
 import cv2
+from shapely.geometry import shape
 
 import matplotlib.pyplot as plt
 
@@ -224,7 +225,8 @@ def fetch_current_sar_image(bbox, date_start, date_end, size=256):
         "bands": ["VV"],
     })
 
-    res = requests.get(url, timeout=120)
+    # Increase timeout for large area exports
+    res = requests.get(url, timeout=300)
     res.raise_for_status()
 
     print(f"  GeoTIFF downloaded: {len(res.content)} bytes")
@@ -243,7 +245,8 @@ def fetch_2010_mask_image(mask_ee, bbox, size=256):
         "format": "png",
     })
     
-    res = requests.get(url, timeout=60)
+    # Increase timeout for large area exports (e.g. National)
+    res = requests.get(url, timeout=300)
     res.raise_for_status()
     return res.content
 
@@ -338,17 +341,33 @@ def main():
         if analysis_scale == "National":
             # Pakistan full boundary
             country = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017").filter(ee.Filter.eq("country_na", "Pakistan"))
-            geom = shape(country.first().geometry().getInfo())
-            display_name = "Pakistan (National)"
+            if country.size().getInfo() > 0:
+                geom = shape(country.first().geometry().getInfo())
+                display_name = "Pakistan (National)"
+            else:
+                st.error("Could not fetch National boundary from GEE.")
         elif analysis_scale == "Province":
-            # FAO Level 1 for provinces
+            # FAO Level 1 for provinces - use robust matching
             prov_fc = ee.FeatureCollection("FAO/GAUL/2015/level1").filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
-            match = prov_fc.filter(ee.Filter.eq("ADM1_NAME", district))
-            geom = shape(match.first().geometry().getInfo())
-            display_name = f"{district} (Province)"
-        else:
-            row = gdf[gdf["__district_name__"] == district].iloc[0]
-            geom = row["geometry"]
+            match = prov_fc.filter(ee.Filter.stringContains("ADM1_NAME", district))
+            
+            if match.size().getInfo() > 0:
+                geom = shape(match.first().geometry().getInfo())
+                display_name = f"{district} (Province)"
+            else:
+                st.error(f"Could not find Province boundary for '{district}' in GEE.")
+        
+        # Final fallback if GEE fails or for standard District mode
+        if geom is None:
+            # Dropdown district
+            try:
+                row = gdf[gdf["__district_name__"] == district].iloc[0]
+                geom = row["geometry"]
+            except:
+                # Absolute fallback to first district if everything fails
+                row = gdf.iloc[0]
+                geom = row["geometry"]
+                display_name = row["__district_name__"]
 
     ee_geom = shapely_to_ee(geom)
     district = display_name
