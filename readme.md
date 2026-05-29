@@ -87,24 +87,33 @@ Batch run writes:
 - Computing the **2010 Landsat mask** can take a while. In Streamlit, it’s cached in your session (so it won’t repeat every click).
 - UNet inference runs after the SAR thumbnail is fetched from GEE.
 
+## Technical Deep Dive
+
+### 1. The UNet Model: Full Image Flow
+The lifecycle of a single flood detection prediction follows these steps:
+1.  **Request (GEE):** When a district and date are selected, the system fetches **Sentinel-1 SAR** imagery (VV band) via Google Earth Engine.
+2.  **Data Form:** Data arrives as **GeoTIFF** bytes (matrix of radar backscatter values in dB).
+3.  **Preprocessing:**
+    *   **Normalization:** Raw dB values (approx. -25 to 0) are scaled to [0, 1].
+    *   **Synthetic RGB:** Creates a 3-channel tensor: Channel 1 (VV), Channel 2 (VH approx), Channel 3 (VH/VV ratio).
+    *   **Resizing:** Imagery is standardized to **256x256 pixels**.
+4.  **Inference:** The tensor is fed into a **UNet (ResNet34)** model trained on Pakistan-specific flood events.
+5.  **Output:** A probability map is generated. Pixels > 0.5 are classified as **Flood** (blue overlay).
+
+### 2. FFC (Federal Flood Commission) Data
+1.  **Source:** Official FFC discharge web portal.
+2.  **Scraping & Parsing:** Uses `BeautifulSoup` to extract real-time table data for major barrages (Tarbela, Sukkur, Kotri, etc.).
+3.  **Metrics:** Tracks **Inflow**, **Outflow**, and **Risk Status** (NORMAL, HIGH, EXTREME).
+4.  **Visualization:** Data is parsed into JSON and rendered as interactive charts in the "River Flows" tab.
+
+### 3. 2010 Historical Baseline
+1.  **Satellite Source:** **Landsat 5** imagery (Collection 2 Level 2) via GEE.
+2.  **Methodology (MNDWI):** Uses the Modified Normalized Difference Water Index:
+    $$\text{MNDWI} = \frac{\text{Green} - \text{SWIR1}}{\text{Green} + \text{SWIR1}}$$
+3.  **Temporal Analysis:**
+    *   **Baseline:** 2009 median composite (permanent water bodies).
+    *   **Flood Peak:** July–September 2010 maximum composite.
+4.  **Result:** The system subtracts the 2009 baseline from the 2010 peak to isolate **"New Flooded Areas"** for severity benchmarking.
+
 ## License
 Add your license here.
-
-
-
----
-Sentinel-1 Satellite
-        ↓
-Google Earth Engine
-        ↓
-VV SAR band
-        ↓
-Median composite
-        ↓
-PNG rendering
-        ↓
-requests.get()
-        ↓
-PIL image preprocessing
-        ↓
-UNet model
