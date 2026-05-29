@@ -255,22 +255,36 @@ def main():
 
     gdf, _ = load_districts_cached()
 
-    # District picker
-    priority_only = st.sidebar.checkbox("Use Priority Districts only", value=True)
-    if priority_only:
-        opts = sorted(
-            {x for x in gdf["__district_name__"].tolist() if any(p.lower() in x.lower() for p in PRIORITY_DISTRICTS)}
-        )
-    else:
-        opts = sorted({x for x in gdf["__district_name__"].tolist()})
+    # Scale selector
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Analysis Scale")
+    analysis_scale = st.sidebar.selectbox(
+        "Select Scope", 
+        ["District", "Province", "National"],
+        help="National/Province will provide a Low-Res Overview of the entire region."
+    )
 
-    district = st.sidebar.selectbox("District (Pre-defined)", options=opts, index=0 if opts else 0)
+    if analysis_scale == "National":
+        district = "Pakistan"
+    elif analysis_scale == "Province":
+        prov_opts = sorted(["Punjab", "Sindh", "Khyber Pakhtunkhwa", "Balochistan", "Azad Jammu & Kashmir", "Gilgit-Baltistan"])
+        district = st.sidebar.selectbox("Select Province", prov_opts)
+    else:
+        # District picker
+        priority_only = st.sidebar.checkbox("Use Priority Districts only", value=True)
+        if priority_only:
+            opts = sorted(
+                {x for x in gdf["__district_name__"].tolist() if any(p.lower() in x.lower() for p in PRIORITY_DISTRICTS)}
+            )
+        else:
+            opts = sorted({x for x in gdf["__district_name__"].tolist()})
+        district = st.sidebar.selectbox("District (Pre-defined)", options=opts, index=0 if opts else 0)
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Advanced: Search Custom Area")
-    search_name = st.sidebar.text_input("Enter Area Name (e.g. Taunsa, Charsadda)", help="Type a city or tehsil name. If found, it will override the district selection.")
+    search_name = st.sidebar.text_input("Enter Area Name (Overrides Scale)", help="Type a city or tehsil name. If found, it will override the scale selection.")
 
-    # Date range: used for Sentinel-1 current flood estimation
+    # Date range
     default_end = datetime.now().date()
     default_start = default_end - timedelta(days=30)
     start_date = st.sidebar.date_input("Current SAR start date", value=default_start)
@@ -282,7 +296,7 @@ def main():
         run = st.button("Run analysis", type="primary", use_container_width=True)
 
     if not run:
-        st.info("Pick a district or type a search name, then press Run analysis.")
+        st.info("Select a scale/district and press Run analysis.")
         return
 
     # ── Geometry Resolution ──
@@ -290,54 +304,60 @@ def main():
     display_name = district
     
     if search_name.strip():
-        with st.spinner(f"Searching for '{search_name}' in Pakistan districts..."):
+        with st.spinner(f"Searching for '{search_name}' in Pakistan (Districts/Tehsils)..."):
             # Use FAO GAUL Level 2, filtered specifically for Pakistan
             pakistan_fc = ee.FeatureCollection("FAO/GAUL/2015/level2") \
                             .filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
             
-            # Try exact match first (case-insensitive-ish via capitalize)
             search_term = search_name.strip()
+            # 1. Try exact match in ADM2_NAME (Districts/Sub-districts)
             match = pakistan_fc.filter(ee.Filter.eq("ADM2_NAME", search_term.capitalize()))
             
-            # Fallback to partial match if exact fails
+            # 2. Try partial match if exact fails
             if match.size().getInfo() == 0:
                 match = pakistan_fc.filter(ee.Filter.stringContains("ADM2_NAME", search_term))
             
-            # Last fallback: search ADM1 (Provinces) just in case
+            # 3. Last fallback: search for Provinces/Regions
             if match.size().getInfo() == 0:
                 prov_fc = ee.FeatureCollection("FAO/GAUL/2015/level1").filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
                 match = prov_fc.filter(ee.Filter.stringContains("ADM1_NAME", search_term))
 
             if match.size().getInfo() > 0:
                 feat = match.first()
-                geom_info = feat.geometry().getInfo()
-                from shapely.geometry import shape
-                geom = shape(geom_info)
-                # Try to get the official name from properties
-                try:
-                    props = feat.toDictionary().getInfo()
-                    official_name = props.get("ADM2_NAME") or props.get("ADM1_NAME") or search_term
-                    display_name = f"{official_name} (GEE Search)"
-                except:
-                    display_name = search_term
+                props = feat.toDictionary().getInfo()
+                # Get the official administrative name (Tehsil/District)
+                official_name = props.get("ADM2_NAME") or props.get("ADM1_NAME") or search_term
                 
-                st.sidebar.success(f"Verified: {display_name}")
+                geom = shape(feat.geometry().getInfo())
+                display_name = f"{official_name} (Search)"
+                st.sidebar.success(f"Verified Area: {official_name}")
             else:
-                st.sidebar.warning(f"District '{search_name}' not found. Defaulting to '{district}'.")
-                row = gdf[gdf["__district_name__"] == district].iloc[0]
-                geom = row["geometry"]
-    else:
-        row = gdf[gdf["__district_name__"] == district].iloc[0]
-        geom = row["geometry"]
+                st.sidebar.warning(f"'{search_name}' not found. Using selection instead.")
+    
+    if geom is None:
+        if analysis_scale == "National":
+            # Pakistan full boundary
+            country = ee.FeatureCollection("USDOS/LSIB_SIMPLE/2017").filter(ee.Filter.eq("country_na", "Pakistan"))
+            geom = shape(country.first().geometry().getInfo())
+            display_name = "Pakistan (National)"
+        elif analysis_scale == "Province":
+            # FAO Level 1 for provinces
+            prov_fc = ee.FeatureCollection("FAO/GAUL/2015/level1").filter(ee.Filter.eq("ADM0_NAME", "Pakistan"))
+            match = prov_fc.filter(ee.Filter.eq("ADM1_NAME", district))
+            geom = shape(match.first().geometry().getInfo())
+            display_name = f"{district} (Province)"
+        else:
+            row = gdf[gdf["__district_name__"] == district].iloc[0]
+            geom = row["geometry"]
 
     ee_geom = shapely_to_ee(geom)
-    district = display_name # Use the searched name for display
+    district = display_name
     
-    # Calculate bbox with a 15% buffer for better geographic context
+    # Calculate bbox
     minx, miny, maxx, maxy = geom.bounds
     w_deg = maxx - minx
     h_deg = maxy - miny
-    buffer_percent = 0.15
+    buffer_percent = 0.05 if analysis_scale in ["Province", "National"] else 0.15
     bbox = [
         minx - w_deg * buffer_percent, 
         miny - h_deg * buffer_percent, 
@@ -346,17 +366,14 @@ def main():
     ]
     
     # ── Dynamic Resolution Calculation ──
-    # Goal: ~80 meters per pixel for reliable UNet detection
-    # 1 degree is roughly 111,000 meters.
-    target_res_m = 80
-    pixels_w = int((w_deg * 1.3) * 111000 / target_res_m)
-    pixels_h = int((h_deg * 1.3) * 111000 / target_res_m)
+    # Target resolution: ~1000m for National/Province, ~80m for District
+    target_res_m = 1000 if analysis_scale in ["Province", "National"] else 80
     
-    # Constrain to reasonable limits for GEE/Memory (min 256, max 1024)
-    final_size_w = max(256, min(1024, pixels_w))
-    final_size_h = max(256, min(1024, pixels_h))
-    # We'll use the larger dimension as a square for the UNet tiles
-    final_size = max(final_size_w, final_size_h)
+    pixels_w = int((w_deg * 1.1) * 111000 / target_res_m)
+    pixels_h = int((h_deg * 1.1) * 111000 / target_res_m)
+    
+    # GEE Limits: 1024 is safe for memory and speed
+    final_size = max(256, min(1024, max(pixels_w, pixels_h)))
 
     # 1) Historical 2010 mask
     if "hist_flood_mask" not in st.session_state:
