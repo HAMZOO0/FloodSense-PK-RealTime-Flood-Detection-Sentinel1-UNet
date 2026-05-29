@@ -432,9 +432,19 @@ def main():
     df_flows = pd.DataFrame(river_flows)
     matched_station = match_station_to_district(district, river_flows)
 
-    # 4) Groq AI insights
-    with st.spinner("Generating AI strategic insights..."):
+    # 4) Gemini AI insights
+    with st.spinner("Generating evidence-based strategic insights..."):
         ai = FloodAI()
+        # Calculate the defensible risk score using our new engine logic
+        risk_score = ai.calculate_defensible_risk(
+            {
+                "flood_pct_current": pct_current,
+                "flood_pct_2010": pct_2010,
+                "river_status": matched_station["status"] if matched_station else "UNKNOWN"
+            },
+            river_flows
+        )
+        
         summary_for_ai = [
             {
                 "district": district,
@@ -462,29 +472,25 @@ def main():
     st.divider()
 
     # Clean, non-overlapping UI using tabs
-    t1, t2, t3, t4 = st.tabs(["Overview", "Detection", "River Flows", "AI Insights"])
+    t1, t2, t3, t4 = st.tabs(["Overview", "Detection", "River Flows", "AI Intelligence"])
 
 
     with t1:
         st.subheader("Flood Severity Comparison: 2010 vs. Current")
         st.markdown("""
-        Comparison between the historical maximum flood extent (2010) and the current situation detected by AI. 
-        Blue areas indicate standing water.
+        Evidence-based comparison between the historical maximum (2010) and current AI detection. 
         """)
-        
-        # Standardized height for professional alignment
-        IMG_HEIGHT = 450
         
         # ── Visual Comparison Section ──
         col_img1, col_img2 = st.columns(2)
         with col_img1:
             st.markdown("#### **[A] 2010 Historical Baseline**")
             st.image(hist_mask_bytes, caption="Satellite: Landsat-5 | Method: MNDWI", use_container_width=True)
-            st.info("2010 Context: This represents the peak flood footprint during the 2010 disaster in Pakistan.")
+            st.info("2010 Context: Peak flood footprint during the 2010 disaster.")
         with col_img2:
             st.markdown(f"#### **[B] Current Situation ({start_date})**")
             st.image(overlay_img, caption="Satellite: Sentinel-1 SAR | Method: UNet AI", use_container_width=True)
-            st.info("Live Status: Current water detection based on latest available radar imagery.")
+            st.info("Live Status: Latest available radar-based water detection.")
 
         st.divider()
 
@@ -495,34 +501,27 @@ def main():
         c1.metric(
             "2010 HISTORICAL %", 
             f"{pct_2010:.2f}%",
-            help="Percentage of the district area flooded during the peak of the 2010 disaster."
+            help="Total district area flooded in 2010."
         )
         c2.metric(
             "CURRENT FLOOD %", 
             f"{pct_current:.2f}%",
-            help="Current percentage of the district area identified as flooded by the UNet AI model."
+            help="Current area flooded as detected by Sentinel-1/UNet."
         )
         
-        delta = None
-        try:
-            delta = float(pct_current) - float(pct_2010)
-        except Exception:
-            delta = None
-            
-        if delta is not None:
-            c3.metric(
-                "DELTA SEVERITY", 
-                f"{delta:+.2f}%", 
-                delta=f"{delta:+.2f}%", 
-                delta_color="inverse",
-                help="The difference in flood extent (Current % - 2010 %). A negative value indicates the current flood is less severe than 2010."
-            )
+        delta = float(pct_current) - float(pct_2010)
+        c3.metric(
+            "DELTA SEVERITY", 
+            f"{delta:+.2f}%", 
+            delta=f"{delta:+.2f}%", 
+            delta_color="inverse",
+            help="Current % - 2010 %. Positive means worse than 2010."
+        )
 
         st.markdown(f"""
-        ### **Executive Summary**
-        *   **Extent:** The current flood extent is **{pct_current:.2f}%**, which is **{abs(delta):.2f}% {'higher' if delta > 0 else 'lower'}** than the 2010 benchmark.
-        *   **Scale:** Current flooding is roughly **{ (pct_current / (pct_2010 if pct_2010 > 0 else 1)) * 100:.1f}%** as severe as the 2010 disaster.
-        *   **Impact Level:** The system has classified this district as **{settlement_risk.upper()}** risk.
+        ### **Risk Governance Summary**
+        *   **Defensible Risk Score:** **{risk_score}/10** (Computed via Weighted Multi-Factor Analysis)
+        *   **Comparative Severity:** Current flooding is **{ (pct_current / (pct_2010 if pct_2010 > 0 else 1)) * 100:.1f}%** of the 2010 benchmark.
         """)
         
         st.progress(min(1.0, risk_score / 10.0))
@@ -534,11 +533,8 @@ def main():
             st.success(
                 f"**Station:** {matched_station['station']} | **River:** {matched_station['river']} | **Status:** {matched_station['status']}"
             )
-            st.caption(
-                f"Real-time Discharge (Cusecs) → Inflow: {matched_station.get('inflow')} | Outflow: {matched_station.get('outflow')}"
-            )
         else:
-            st.info("No monitoring station directly associated with this district name.")
+            st.warning("⚠️ **Data Gap:** No hydraulic monitoring station found for this district boundary. Confidence in river status is reduced.")
 
     with t2:
         st.subheader("UNet Deep Learning Analysis")
@@ -546,76 +542,122 @@ def main():
 
         col_a, col_b = st.columns(2)
         
-        # Ensure consistent sizing in detection tab as well
         with col_a:
             st.markdown("#### **Unified Detection Mask**")
             one_diagram = render_unet_one_diagram(
                 unet_result["display_arr"], unet_result["pred_prob"], unet_result["pred_mask"]
             )
-            st.image(one_diagram, caption="Background: SAR | Red-Yellow: Prob | Blue: Mask", use_container_width=True)
+            st.image(one_diagram, caption="Combined SAR + Probability + Mask", use_container_width=True)
         
         with col_b:
             st.markdown("#### **Confidence Heatmap**")
-            st.image(prob_heatmap, caption="Probability Score (0.0 to 1.0)", use_container_width=True)
+            st.image(prob_heatmap, caption="AI Probability Score (0.0 to 1.0)", use_container_width=True)
 
         st.divider()
         st.markdown("### Model Performance Metrics")
         m1, m2, m3 = st.columns(3)
         m1.metric("Pixel Water Coverage", f"{pct_current:.2f}%")
         m2.metric("Total Affected Area", f"{unet_result['affected_area_km2']:.1f} km²")
-        m3.metric("AI Architecture", "ResNet34-UNet")
+        m3.metric("AI Architecture", "ResNet34-UNet (Tiled)")
 
     with t3:
-        st.subheader("FFC river discharge (scraped)")
+        st.subheader("Hydraulic Intelligence: FFC River Discharge")
         if df_flows.empty:
-            st.warning("No river flows found. Check `Data_URL` in `.env`.")
+            st.warning("No river flows found. Check FFC data source.")
         else:
-            # Status chips
+            # ── Status Distribution ──
             status_counts = df_flows["status"].value_counts(dropna=False).to_dict()
-            st.write("### Status distribution")
+            st.markdown("#### **Network Status Overview**")
             sc1, sc2, sc3, sc4 = st.columns(4)
             sc1.metric("NORMAL", status_counts.get("NORMAL", 0))
             sc2.metric("HIGH", status_counts.get("HIGH", 0))
             sc3.metric("EXTREME", status_counts.get("EXTREME", 0))
-            sc4.metric("NOT RECEIVED", status_counts.get("NOT_RECEIVED", 0))
+            sc4.metric("DATA GAPS", status_counts.get("NOT_RECEIVED", 0))
 
-            # Charts: top inflow/outflow
-            st.write("### Top stations by inflow/outflow")
+            st.divider()
+
+            # ── Charts Section ──
+            st.markdown("#### **Top 10 Stations by Volume (Cusecs)**")
             df_plot = df_flows.copy()
             df_plot["inflow"] = pd.to_numeric(df_plot["inflow"], errors="coerce")
             df_plot["outflow"] = pd.to_numeric(df_plot["outflow"], errors="coerce")
-
+            
             top_in = df_plot.dropna(subset=["inflow"]).sort_values("inflow", ascending=False).head(10)
             top_out = df_plot.dropna(subset=["outflow"]).sort_values("outflow", ascending=False).head(10)
 
-            if len(top_in) > 0:
-                st.bar_chart(top_in.set_index("station")["inflow"], use_container_width=True)
-            if len(top_out) > 0:
-                st.bar_chart(top_out.set_index("station")["outflow"], use_container_width=True)
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                st.caption("Top Inflow Stations")
+                if not top_in.empty:
+                    st.bar_chart(top_in.set_index("station")["inflow"], color="#3366cc")
+            with col_c2:
+                st.caption("Top Outflow Stations")
+                if not top_out.empty:
+                    st.bar_chart(top_out.set_index("station")["outflow"], color="#dc3912")
 
-            st.write("### Inflow vs outflow (all stations)")
+            st.divider()
+            
+            st.markdown("#### **Inflow vs. Outflow Correlation**")
             df_sc = df_plot.dropna(subset=["inflow", "outflow"]).copy()
             if len(df_sc) > 0:
-                fig, ax = plt.subplots(figsize=(8, 4))
-                # Color by status for quick reading
-                colors = {"NORMAL": "#00cc66", "HIGH": "#ffaa00", "EXTREME": "#ff4444", "NOT_RECEIVED": "#7b8794", "UNKNOWN": "#8aa5ff"}
+                fig, ax = plt.subplots(figsize=(10, 4))
+                colors = {"NORMAL": "#109618", "HIGH": "#ff9900", "EXTREME": "#ff0000", "NOT_RECEIVED": "#7b8794", "UNKNOWN": "#8aa5ff"}
                 for status, g in df_sc.groupby(df_sc["status"].astype(str)):
-                    ax.scatter(g["inflow"], g["outflow"], s=28, alpha=0.75, label=status, color=colors.get(status, "#8aa5ff"))
-                ax.set_xlabel("Inflow")
-                ax.set_ylabel("Outflow")
-                ax.legend(fontsize=8, loc="best")
-                ax.grid(True, alpha=0.2)
+                    ax.scatter(g["inflow"], g["outflow"], s=45, alpha=0.7, label=status, color=colors.get(status, "#8aa5ff"), edgecolors='white')
+                
+                ax.set_xlabel("Inflow (Cusecs)", fontsize=9)
+                ax.set_ylabel("Outflow (Cusecs)", fontsize=9)
+                ax.legend(fontsize=8, title="Station Status")
+                ax.grid(True, alpha=0.15)
                 st.pyplot(fig)
 
-            # Full table
-            st.dataframe(df_flows, use_container_width=True, height=420)
+            st.divider()
+            st.markdown("#### **Raw Hydraulic Data Table**")
+            st.dataframe(df_flows, use_container_width=True, height=400)
 
     with t4:
-        st.subheader("Groq AI strategic insights")
-        st.caption("Generated using Current vs 2010 flood context + live river discharge.")
-        provider = "Groq" if os.getenv("GROQ_API_KEY") else "Gemini/Simulated"
-        st.info(f"AI provider: {provider}")
-        st.markdown(insights)
+        st.subheader("Gemini AI: Tactical Intelligence Report")
+        st.caption("Evidence-based operational recommendations derived from spatial and hydraulic metrics.")
+        
+        # ── Risk Visual Overview ──
+        c_risk1, c_risk2 = st.columns([1, 2])
+        with c_risk1:
+            st.metric("COMPOSITE RISK", f"{risk_score}/10")
+            risk_color = "red" if risk_score > 7 else "orange" if risk_score > 4 else "green"
+            st.markdown(f"<div style='height:15px; width:100%; background-color:{risk_color}; border-radius:10px;'></div>", unsafe_allow_html=True)
+            
+        with c_risk2:
+            conf_level = "HIGH" if matched_station else "MEDIUM (Data Gaps)"
+            st.info(f"Report Fidelity: **{conf_level}**")
+
+        st.divider()
+
+        # ── Structured Insights ──
+        if "[" in insights and "]" in insights:
+            lines = insights.split("\n")
+            for line in lines:
+                line = line.strip()
+                if not line: continue
+                
+                if "[SITUATION" in line.upper():
+                    st.markdown(f"#### 📡 Situation Summary")
+                    st.info(line.split("]")[-1].strip())
+                elif "[HYDRAULIC" in line.upper():
+                    st.markdown(f"#### 🌊 Hydraulic Analysis")
+                    st.write(line.split("]")[-1].strip())
+                elif "[HISTORICAL" in line.upper():
+                    st.markdown(f"#### 📜 Historical Benchmark")
+                    st.write(line.split("]")[-1].strip())
+                elif "[OPERATIONAL" in line.upper():
+                    st.markdown(f"#### 🚨 Operational Actions")
+                    st.warning(line.split("]")[-1].strip())
+                elif "[CONFIDENCE" in line.upper():
+                    st.caption(f"**Confidence Level:** {line.split(']')[-1].strip()}")
+        else:
+            st.markdown(insights)
+
+        st.divider()
+        st.caption(f"Governance: Weighted Risk Formula (Flood% 40, Delta 30, Hydraulic 30)")
 
 
 if __name__ == "__main__":

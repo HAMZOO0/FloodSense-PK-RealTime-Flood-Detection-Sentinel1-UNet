@@ -38,24 +38,60 @@ class FloodAI:
         if not self.enabled:
             print("⚠️ No valid AI API keys (Gemini/Groq) found. AI insights will be simulated.")
 
+    def calculate_defensible_risk(self, d, river_data):
+        """
+        Derives a risk score (1-10) using weighted multi-factor analysis.
+        """
+        # 1. Flood Extent Weight (40%)
+        f_score = min(10, (d.get('flood_pct_current', 0) / 5) * 10) 
+        
+        # 2. Delta vs 2010 Weight (30%)
+        # If today is worse than 2010, this spikes the score.
+        delta = d.get('flood_pct_current', 0) - d.get('flood_pct_2010', 0)
+        d_score = 5 + (delta * 2) # Base 5, +2 for every % above 2010
+        d_score = max(0, min(10, d_score))
+        
+        # 3. Hydraulic Weight (30%)
+        h_score = 1
+        status = d.get('river_status', 'UNKNOWN')
+        if status == 'EXTREME': h_score = 10
+        elif status == 'HIGH': h_score = 7
+        elif status == 'NORMAL': h_score = 2
+        
+        # Weighted sum
+        raw_risk = (f_score * 0.4) + (d_score * 0.3) + (h_score * 0.3)
+        return round(max(1, min(10, raw_risk)), 1)
+
     def generate_insights(self, district_data, river_data):
         """
-        Generates strategic insights based on current vs historical flood data and river flows.
+        Generates grounded strategic insights with numerical evidence.
         """
+        d = district_data[0] # Focus on current selection
+        risk_score = self.calculate_defensible_risk(d, river_data)
+        
         prompt = f"""
-        Act as a Disaster Management Expert. Analyze the Pakistan flood data below and provide 3 PUNCHY, ACTIONABLE strategic insights.
+        Act as a Flood Intelligence Officer. Analyze this Pakistan flood data and provide a structured operational report.
         
-        FORMAT INSTRUCTIONS:
-        - Use very short bullet points.
-        - Start each insight with a clear category like [RELIEF], [INFRASTRUCTURE], or [PREDICTION].
-        - Max 2 sentences per insight.
-        - Be direct and professional.
+        MANDATORY RULES:
+        - REFERENCE NUMBERS (flood %, inflow, delta) in every point.
+        - No generic advice like "monitor closely".
+        - If data is "UNKNOWN", state it as a "Data Gap" that reduces confidence.
         
-        District Data:
-        {json.dumps(district_data, indent=2)}
+        DATA CONTEXT:
+        - District: {d['district']}
+        - Current Flood %: {d['flood_pct_current']:.2f}%
+        - 2010 Historical %: {d['flood_pct_2010']:.2f}%
+        - Delta vs 2010: {(d['flood_pct_current'] - d['flood_pct_2010']):.2f}%
+        - River Status: {d['river_status']}
+        - Inflow at nearest station: {json.dumps(river_data[:3], indent=2)}
+        - Calculated Risk Score: {risk_score}/10
         
-        River Flow Data:
-        {json.dumps(river_data, indent=2)}
+        REPORT STRUCTURE:
+        1. [SITUATION SUMMARY] - 1 sentence summary using flood %.
+        2. [HYDRAULIC ANALYSIS] - Link river inflow to inundation.
+        3. [HISTORICAL BENCHMARK] - Compare today to 2010 with delta.
+        4. [OPERATIONAL ACTIONS] - 2 specific actions for this district.
+        5. [CONFIDENCE] - High/Med/Low based on UNKNOWN statuses.
         """
         
         if self.gemini_enabled:
@@ -64,16 +100,6 @@ class FloodAI:
                 return response.text
             except Exception as e:
                 print(f"Gemini error: {e}")
-
-        if self.groq_enabled:
-            try:
-                chat_completion = self.groq_client.chat.completions.create(
-                    messages=[{"role": "user", "content": prompt}],
-                    model="llama-3.3-70b-versatile",
-                )
-                return chat_completion.choices[0].message.content
-            except Exception as e:
-                print(f"Groq error: {e}")
 
         return self._get_fallback_insights(district_data, river_data)
 
