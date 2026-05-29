@@ -533,6 +533,17 @@ def main():
             st.success(
                 f"**Station:** {matched_station['station']} | **River:** {matched_station['river']} | **Status:** {matched_station['status']}"
             )
+            # Add trend indicators
+            itrend = matched_station.get("inflow_trend", "Steady")
+            otrend = matched_station.get("outflow_trend", "Steady")
+            i_icon = "↑" if "Rising" in itrend else "↓" if "Falling" in itrend else "→"
+            o_icon = "↑" if "Rising" in otrend else "↓" if "Falling" in otrend else "→"
+            
+            st.caption(
+                f"**Inflow:** {matched_station.get('inflow')} {i_icon} ({itrend}) | "
+                f"**Outflow:** {matched_station.get('outflow')} {o_icon} ({otrend})"
+            )
+            st.caption(f"Last Updated: {matched_station.get('recorded', 'N/A')}")
         else:
             st.warning("⚠️ **Data Gap:** No hydraulic monitoring station found for this district boundary. Confidence in river status is reduced.")
 
@@ -610,6 +621,26 @@ def main():
                 ax.legend(fontsize=8, title="Station Status")
                 ax.grid(True, alpha=0.15)
                 st.pyplot(fig)
+
+            st.divider()
+            
+            st.markdown("#### **Interactive River Network (PMD/FFD)**")
+            st.caption("Official real-time river state map provided by the Flood Forecasting Division (PMD).")
+            
+            # Embed the FFD map in an iframe
+            # Note: Some government sites may block iframe embedding. 
+            # We provide a direct link fallback.
+            st.components.v1.iframe("https://ffd.pmd.gov.pk/river-state", height=600, scrolling=True)
+            
+            st.markdown(f"""
+            <div style='text-align: center; padding: 10px;'>
+                <a href='https://ffd.pmd.gov.pk/river-state' target='_blank'>
+                    <button style='background-color: #008CBA; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer;'>
+                        Open Official Map in New Tab
+                    </button>
+                </a>
+            </div>
+            """, unsafe_allow_html=True)
 
             st.divider()
             st.markdown("#### **Raw Hydraulic Data Table**")

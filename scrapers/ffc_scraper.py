@@ -1,122 +1,103 @@
-from dotenv import load_dotenv
-load_dotenv()
-import os
-
 import requests
-from bs4 import BeautifulSoup
 import re
+import json
+from dotenv import load_dotenv
 
+load_dotenv()
 
-URL = os.getenv("Data_URL")
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
-
+URL = "https://ffd.pmd.gov.pk/river-state"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 def clean_num(text):
     if not text:
-        return None
+        return 0
     match = re.findall(r"[\d,]+", text)
-    return int(match[0].replace(",", "")) if match else None
-
+    return int(match[0].replace(",", "")) if match else 0
 
 def get_ffc_data():
-    print("[FFC] Fetching discharge page...", flush=True)
+    """
+    Scrapes official FFD live data by parsing embedded JavaScript station objects.
+    Provides discharge, status, trends, and timestamps.
+    """
+    print(f"[FFD] Fetching high-fidelity data from {URL}...", flush=True)
+    
+    try:
+        res = requests.get(URL, headers=HEADERS, timeout=30)
+        res.raise_for_status()
+        html = res.text
+    except Exception as e:
+        print(f"❌ FFD Fetch Error: {e}")
+        return []
 
-    if not URL:
-        raise ValueError("Data_URL is not set in .env")
-
-    res = requests.get(URL, headers=HEADERS, timeout=20)
-    res.raise_for_status()
-
-    soup = BeautifulSoup(res.text, "html.parser")
-
-    rows = soup.find_all("tr")
+    # Extract all station blocks: var s = { ... };
+    pattern = r'var s = \{(.*?)\};'
+    matches = re.findall(pattern, html, re.DOTALL)
 
     data = []
-    current_station = None
+    for m in matches:
+        def field(key):
+            # Handles both "key": and key: (unquoted keys in JS objects)
+            r = re.search(rf'["\']?{key}["\']?:\s*["\']([^"\']*)["\']', m)
+            return r.group(1) if r else None
 
-    for row in rows:
-        classes = row.get("class", [])
+        name      = field("name")
+        status    = field("status")
+        river     = field("area_name")
+        recorded  = field("recording_time")
 
-        # ───────── MAIN DATA ROW ─────────
-        if "data-row" in classes:
-            cols = row.find_all("td")
+        # Parse gauges array for Inflow/Outflow and Trends
+        # Format: {type:"OUTFLOW",discharge:"43,700",trend:"Falling"}
+        gauges_raw = re.findall(
+            r'\{["\']?type["\']?:\s*["\']([^"\']*)["\']\s*,\s*["\']?discharge["\']?:\s*["\']([^"\']*)["\']\s*,\s*["\']?trend["\']?:\s*["\']([^"\']*)["\']',
+            m
+        )
+        
+        inflow = 0
+        outflow = 0
+        inflow_trend = "Steady"
+        outflow_trend = "Steady"
 
-            if len(cols) < 2:
-                continue
+        for g_type, g_disc, g_trend in gauges_raw:
+            val = clean_num(g_disc)
+            if g_type.upper() == "INFLOW":
+                inflow = val
+                inflow_trend = g_trend
+            elif g_type.upper() == "OUTFLOW":
+                outflow = val
+                outflow_trend = g_trend
 
-            station_text = cols[0].get_text(" ", strip=True)
+        # Normalize status to match dashboard expectations
+        std_status = "UNKNOWN"
+        if status:
+            s_up = status.upper()
+            if "NORMAL" in s_up: std_status = "NORMAL"
+            elif "HIGH" in s_up: std_status = "HIGH"
+            elif "EXTREME" in s_up or "EX" in s_up: std_status = "EXTREME"
 
-            # extract station + river
-            match = re.match(r"(.+)\((.+)\)", station_text)
-            if match:
-                station = match.group(1).strip()
-                river = match.group(2).strip()
-            else:
-                station = station_text
-                river = "Unknown"
-
-            # check "Not Received"
-            if "Not Received" in row.get_text():
-                data.append({
-                    "station": station,
-                    "river": river,
-                    "inflow": None,
-                    "outflow": None,
-                    "status": "NOT_RECEIVED"
-                })
-                current_station = None
-                continue
-
-            # inflow/outflow parsing
-            inflow_text = cols[1].get_text(" ", strip=True)
-            outflow_text = cols[2].get_text(" ", strip=True)
-
-            inflow = clean_num(inflow_text)
-            outflow = clean_num(outflow_text)
-
-            # status detection
-            status = "UNKNOWN"
-            text = row.get_text().upper()
-            if "NORMAL" in text:
-                status = "NORMAL"
-            elif "HIGH" in text:
-                status = "HIGH"
-            elif "EX_HIGH" in text:
-                status = "EXTREME"
-
-            current_station = {
-                "station": station,
-                "river": river,
-                "inflow": inflow,
-                "outflow": outflow,
-                "status": status
-            }
-
-            data.append(current_station)
-
-        # ───────── IGNORE cyp-row (metadata only) ─────────
-        elif "cyp-row" in classes:
-            continue
+        data.append({
+            "station": name,
+            "river": river,
+            "inflow": inflow,
+            "outflow": outflow,
+            "status": std_status,
+            "inflow_trend": inflow_trend,
+            "outflow_trend": outflow_trend,
+            "recorded": recorded
+        })
 
     return data
-
 
 def main():
     data = get_ffc_data()
-
-    print("\n🌊 FFC River Discharge Data\n")
-
+    print(f"\n🌊 FFD High-Fidelity River Data ({len(data)} stations)\n")
     for d in data:
         print(
             f"{d['station']} ({d['river']}) → "
-            f"Inflow: {d['inflow']} | Outflow: {d['outflow']} | Status: {d['status']}"
+            f"Inflow: {d['inflow']} ({d['inflow_trend']}) | "
+            f"Outflow: {d['outflow']} ({d['outflow_trend']}) | "
+            f"Status: {d['status']}"
         )
-
     return data
-
 
 if __name__ == "__main__":
     main()
