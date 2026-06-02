@@ -220,3 +220,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 best_flood_model.pth
+.expo/
+mobile/.expo/
+# ./node_modules
+mobile/node_modules

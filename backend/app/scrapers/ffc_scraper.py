@@ -1,6 +1,6 @@
-import requests
 import re
-import json
+
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -8,19 +8,17 @@ load_dotenv()
 URL = "https://ffd.pmd.gov.pk/river-state"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+
 def clean_num(text):
     if not text:
         return 0
     match = re.findall(r"[\d,]+", text)
     return int(match[0].replace(",", "")) if match else 0
 
+
 def get_ffc_data():
-    """
-    Scrapes official FFD live data by parsing embedded JavaScript station objects.
-    Provides discharge, status, trends, and timestamps.
-    """
     print(f"[FFD] Fetching high-fidelity data from {URL}...", flush=True)
-    
+
     try:
         res = requests.get(URL, headers=HEADERS, timeout=30)
         res.raise_for_status()
@@ -29,35 +27,29 @@ def get_ffc_data():
         print(f"❌ FFD Fetch Error: {e}")
         return []
 
-    # Extract all station blocks: var s = { ... };
-    pattern = r'var\s+s\s*=\s*\{(.*?)\};'
+    pattern = r"var\s+s\s*=\s*\{(.*?)\};"
     matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
 
     data = []
     for m in matches:
         def field(key):
-            # Extremely aggressive extractor for key: "value" or "key": "value"
-            # Handles varying spaces and quote types
             patterns = [
-                rf'["\']?{key}["\']?\s*:\s*["\']([^"\']*)["\']', # quoted value
-                rf'["\']?{key}["\']?\s*:\s*([^,\n\}}\s]*)'        # unquoted value
+                rf'["\']?{key}["\']?\s*:\s*["\']([^"\']*)["\']',
+                rf'["\']?{key}["\']?\s*:\s*([^,\n\}}\s]*)',
             ]
             for p in patterns:
                 r = re.search(p, m)
-                if r and r.group(1): return r.group(1).strip()
+                if r and r.group(1):
+                    return r.group(1).strip()
             return None
 
-        name      = field("name") or "Unknown Station"
-        status    = field("status") or "NORMAL"
-        river     = field("area_name") or "Unknown River"
-        recorded  = field("recording_time") or "N/A"
-        lat       = field("lat")
-        lon       = field("lon")
+        name = field("name") or "Unknown Station"
+        status = field("status") or "NORMAL"
+        river = field("area_name") or "Unknown River"
+        recorded = field("recording_time") or "N/A"
 
-        # Robustly find all gauge objects { type: "...", discharge: "...", trend: "..." }
-        # Then extract values from each object
-        gauge_objects = re.findall(r'\{([^{}]+)\}', m)
-        
+        gauge_objects = re.findall(r"\{([^{}]+)\}", m)
+
         inflow = 0
         outflow = 0
         inflow_trend = "Steady"
@@ -68,13 +60,14 @@ def get_ffc_data():
                 pat = rf'["\']?{key}["\']?\s*:\s*["\']([^"\']*)["\']'
                 res = re.search(pat, obj_str)
                 return res.group(1) if res else None
-            
+
             g_type = obj_field("type")
             g_disc = obj_field("discharge")
             g_trend = obj_field("trend")
 
-            if not g_type: continue
-            
+            if not g_type:
+                continue
+
             val = clean_num(g_disc)
             if g_type.upper() == "INFLOW":
                 inflow = val
@@ -83,26 +76,31 @@ def get_ffc_data():
                 outflow = val
                 outflow_trend = g_trend or "Steady"
 
-        # Normalize status to match dashboard expectations
         std_status = "UNKNOWN"
         if status:
             s_up = status.upper()
-            if "NORMAL" in s_up: std_status = "NORMAL"
-            elif "HIGH" in s_up: std_status = "HIGH"
-            elif "EXTREME" in s_up or "EX" in s_up: std_status = "EXTREME"
+            if "NORMAL" in s_up:
+                std_status = "NORMAL"
+            elif "HIGH" in s_up:
+                std_status = "HIGH"
+            elif "EXTREME" in s_up or "EX" in s_up:
+                std_status = "EXTREME"
 
-        data.append({
-            "station": name,
-            "river": river,
-            "inflow": inflow,
-            "outflow": outflow,
-            "status": std_status,
-            "inflow_trend": inflow_trend,
-            "outflow_trend": outflow_trend,
-            "recorded": recorded
-        })
+        data.append(
+            {
+                "station": name,
+                "river": river,
+                "inflow": inflow,
+                "outflow": outflow,
+                "status": std_status,
+                "inflow_trend": inflow_trend,
+                "outflow_trend": outflow_trend,
+                "recorded": recorded,
+            }
+        )
 
     return data
+
 
 def main():
     data = get_ffc_data()
@@ -115,6 +113,7 @@ def main():
             f"Status: {d['status']}"
         )
     return data
+
 
 if __name__ == "__main__":
     main()
