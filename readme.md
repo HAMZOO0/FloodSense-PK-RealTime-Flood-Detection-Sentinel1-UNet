@@ -26,6 +26,14 @@
 &nbsp;
 <img src="https://img.shields.io/badge/Landsat--5-2010_Baseline-2E7D32?style=for-the-badge&logo=nasa" alt="Landsat-5 badge"/>
 
+<br/>
+
+<img src="https://img.shields.io/badge/React_19-Web_Console-61DAFB?style=for-the-badge&logo=react&logoColor=black" alt="React badge"/>
+&nbsp;
+<img src="https://img.shields.io/badge/FastAPI-REST_Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white" alt="FastAPI badge"/>
+&nbsp;
+<img src="https://img.shields.io/badge/MongoDB-Atlas-47A248?style=for-the-badge&logo=mongodb&logoColor=white" alt="MongoDB badge"/>
+
 </div>
 
 <p align="center">
@@ -83,6 +91,40 @@ A complete visual overhaul of the dashboard: dark SaaS-style design system (Inte
   <img src="public/new%20ui/screencapture-localhost-8501-2026-07-02-14_28_09.png" alt="Knowledge Assistant tab: gradient chat hero with knowledge-base badges, suggested question chips and a grounded answer with sources" width="920" />
 </p>
 
+### React Web Console (New) — FastAPI-powered
+
+A brand-new production-grade web client in `frontend/` — **React 19 + Vite + TypeScript + Tailwind CSS v4 + TanStack Query** — driven entirely by the **FastAPI REST backend** in `backend/` (MongoDB Atlas persistence, JWT auth, background analysis jobs). Every Streamlit feature is here as a dedicated page, in a dark ops-console design with CVD-validated status colors. See [React Web Console & REST API](#react-web-console--rest-api) for architecture and setup.
+
+#### National Command Overview — stat tiles, live risk ranking & alert feed
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/overview.jpg" alt="React web console Overview page: stat tiles for districts analysed, high-risk count, mean risk and active alerts, plus district risk ranking and recent alerts feed" width="920" />
+</p>
+
+#### Satellite Flood Detection — one-click analysis jobs with live polling
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/detection.jpg" alt="React web console Detection page: district picker, Sentinel-1 SAR flood overlay for Charsadda, 2010 benchmark metric tiles and defensible risk gauge" width="920" />
+</p>
+
+#### Agentic Command Center — four-agent workflow with progression forecast
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/agentic-workflow.jpg" alt="React web console Agentic Workflow page: four-agent stepper, risk tiles, projected flood coverage chart, intelligence assessment and citizen/authority alerts" width="920" />
+</p>
+
+#### Hydraulic Intelligence — 31 live FFD stations with relative-inflow bars
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/river-flows.jpg" alt="React web console River Flows page: live FFD station discharge table with inflow, outflow, trend chips and NORMAL/HIGH/EXTREME status badges" width="920" />
+</p>
+
+#### Alert Command — filterable feed plus authority alert issuing
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/alerts.png" alt="React web console Alerts page: auto-generated evacuation and situation-report alerts with severity chips, district/severity filters and a manual issue panel" width="920" />
+</p>
+
 ---
 
 ## Table of Contents
@@ -101,6 +143,7 @@ A complete visual overhaul of the dashboard: dark SaaS-style design system (Inte
 - [Risk Scoring](#risk-scoring)
 - [Agentic Disaster Workflow](#agentic-disaster-workflow)
 - [RAG Knowledge System](#rag-knowledge-system)
+- [React Web Console & REST API](#react-web-console--rest-api)
 - [Project Structure](#project-structure)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -758,6 +801,67 @@ The seed corpus is `rag/data/Structured-Knowledge-Instruction-Pipeline.pdf` — 
 
 ---
 
+## React Web Console & REST API
+
+The platform now ships a decoupled client–server pair alongside the Streamlit app: a **FastAPI REST backend** and a **React web console**. The Streamlit app talks to the engine directly; the React console talks only to the API — the architecture used in production deployments (and by the mobile client).
+
+```mermaid
+flowchart LR
+    A[React Console<br/>frontend/ · Vite + React 19] -->|/api proxy| B[FastAPI Backend<br/>backend/ · uvicorn :8000]
+    B --> C[(MongoDB Atlas<br/>analyses · alerts · users · chats)]
+    B --> D[GEE + U-Net + FFD + RAG<br/>shared engine]
+```
+
+### Backend (`backend/`) — FastAPI + MongoDB Atlas
+
+- **Background analysis jobs** — `POST /api/analysis/{district}` returns a `job_id` instantly; the full SAR → U-Net → 2010-benchmark → risk-score pipeline runs off-thread and persists to Mongo. Poll `GET /api/jobs/{id}`.
+- **JWT auth** — register/login, per-user home district, `GET /api/alerts/mine` for personalised feeds.
+- **Auto-alerts** — analyses crossing the risk threshold create alert documents automatically; the four-agent pipeline persists its citizen + authority alerts too.
+- Interactive docs at `http://localhost:8000/docs` once running.
+
+| Resource | Endpoints |
+|---|---|
+| Districts | `GET /api/districts`, `GET /api/districts/{name}`, `.../geometry` |
+| Analysis | `POST /api/analysis/{district}`, `GET /api/jobs/{id}`, `GET /api/analysis`, `.../latest`, `.../image`, `.../insights` |
+| Rivers | `GET /api/rivers` (cached FFD scrape, `force_refresh` supported) |
+| Agent pipeline | `POST /api/pipeline/{district}` |
+| Alerts | `GET/POST /api/alerts`, `GET /api/alerts/mine` |
+| Knowledge chat | `POST /api/chat`, `GET /api/chat/history` |
+| Auth | `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me` |
+
+### Frontend (`frontend/`) — React 19 + Vite + TypeScript
+
+- **Tailwind CSS v4** design system: dark ops-console on the `#0B0F19` brand base, Inter + Space Grotesk (self-hosted), electric-blue accent.
+- **TanStack Query v5** for data fetching, caching, and the 4-second job polling loop; **React Router 7**; **Radix UI** primitives; **Recharts** for the flood-progression forecast.
+- Severity/status colors are validated for ≥3:1 contrast and color-vision-deficiency separation on the dark surface, and always paired with icon + label.
+- Seven pages mirroring the Streamlit tabs: Overview, Detection, River Flows, AI Intelligence, Agentic Workflow, Alerts, Knowledge Assistant.
+
+#### AI Tactical Intelligence & Knowledge Assistant pages
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/ai-intelligence.jpg" alt="React web console AI Intelligence page: Gemini/Groq tactical report for Larkana with monitoring, infrastructure and predictive-alert insights" width="920" />
+</p>
+
+<p align="center">
+  <img src="public/react%20web%20dashboard/knowledge-assistant.jpg" alt="React web console Knowledge Assistant page: RAG chat answering a risk-score question with cited PDF sources" width="920" />
+</p>
+
+### Run the pair
+
+```powershell
+# Terminal 1 — API (project root; needs MONGO_URI etc. in .env)
+uvicorn backend.app:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — React console
+cd frontend
+npm install
+npm run dev        # http://localhost:5173 — /api is proxied to :8000
+```
+
+Production build: `npm run build` outputs a static `dist/` — serve it from any host and route `/api/*` to the FastAPI service. Full details in [`frontend/README.md`](frontend/README.md) and [`backend/README.md`](backend/README.md).
+
+---
+
 ## Project Structure
 
 ```
@@ -765,6 +869,22 @@ GDG-Flood-forcast/
 │
 ├── streamlit_app.py          # Executive dashboard (primary UI)
 ├── main.py                   # CLI batch analysis engine
+│
+├── backend/                  # FastAPI REST API (uvicorn backend.app:app)
+│   ├── app.py                # App entry: CORS, lifespan, router mounting
+│   ├── config.py             # .env-driven settings (Mongo, GEE, JWT)
+│   ├── db.py                 # MongoDB Atlas client + 503-safe access
+│   ├── jobs.py               # Background analysis job runner
+│   ├── security.py           # JWT auth (register/login/me)
+│   ├── routes/               # districts, analysis, rivers, pipeline, alerts, chat, auth, health
+│   └── services/             # analysis, gee, geodata, rivers, ai, rag, pipeline glue
+│
+├── frontend/                 # React web console (Vite + React 19 + TS)
+│   ├── src/lib/api.ts        # Typed client for every /api endpoint
+│   ├── src/components/       # Design system + domain widgets (risk gauge, chips)
+│   ├── src/pages/            # Overview, Detection, Rivers, Intelligence,
+│   │                         #   Workflow, Alerts, Knowledge Assistant
+│   └── vite.config.ts        # /api dev proxy → localhost:8000
 │
 ├── models/
 │   ├── model_inference.py    # Tiled U-Net inference + metrics
@@ -817,6 +937,7 @@ GDG-Flood-forcast/
 │   ├── architecture/         # Sequence diagram PNG fallback
 │   ├── dashboard/            # Streamlit UI captures
 │   ├── flat mobile app/      # Flet mobile app screenshots
+│   ├── react web dashboard/  # React web console screenshots
 │   ├── District/             # Charsadda case-study outputs
 │   ├── Provence/             # Province-level outputs
 │   ├── Sentinel-1.png
