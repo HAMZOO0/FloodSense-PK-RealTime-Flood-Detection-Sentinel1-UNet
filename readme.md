@@ -1151,6 +1151,20 @@ If you subscribed an email, a confirmation banner appears after the run showing 
 
 Or use the hosted version: **[floodsense-pk.streamlit.app](https://floodsense-pk.streamlit.app/)**
 
+### Launch the React web console + API
+
+```powershell
+# Terminal 1 — FastAPI backend (docs at http://localhost:8000/docs)
+uvicorn backend.app:app --host 0.0.0.0 --port 8000
+
+# Terminal 2 — React console (http://localhost:5173)
+cd frontend
+npm install
+npm run dev
+```
+
+See [React Web Console & REST API](#react-web-console--rest-api) for the architecture, endpoint reference, and screenshots.
+
 ### Launch the mobile app
 
 ```bash
